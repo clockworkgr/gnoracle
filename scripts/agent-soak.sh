@@ -8,8 +8,9 @@
 #   make dev-keys && REMOTE=http://127.0.0.1:36657 make chain-test   # creates and activates feed 1
 #   REMOTE=http://127.0.0.1:36657 make agent-soak
 #
-# Variables: FEED (1), AGENTS (3: test1 plus new keys), DURATION (240 s),
-# PRICE_PORT (38999), REMOTE, CHAINID (dev), GNOKEY_PASSWORD (devpassword).
+# Variables: FEED (1), AGENTS (3: test1 plus new keys), EXTRA_KEYS (existing
+# dev keys to run as agents too, e.g. "prov2"), DURATION (240 s), PRICE_PORT
+# (38999), REMOTE, CHAINID (dev), GNOKEY_PASSWORD (devpassword).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here"
@@ -45,7 +46,13 @@ echo "status $STATUS, interval ${INTERVAL}s, window ${WINDOW}s, providers $ACTIV
 
 step "keys and registrations"
 KEYS=(test1)
-for n in $(seq 1 $((AGENTS - 1))); do
+for name in ${EXTRA_KEYS:-}; do
+  addr="$(gk list 2>/dev/null | grep -A1 " $name " | grep -oE 'g1[0-9a-z]{38}' | head -1)"
+  [ -n "$addr" ] || fail "EXTRA_KEYS: no key named $name in $GNOKEY_HOME"
+  echo "$name ($addr): existing key, runs as an agent"
+  KEYS+=("$name")
+done
+for n in $(seq 1 $((AGENTS - 1 - $(echo ${EXTRA_KEYS:-} | wc -w)))); do
   name="soak$n"
   if ! gk list 2>/dev/null | grep -q " $name "; then
     printf '%s\n%s\n' "$GNOKEY_PASSWORD" "$GNOKEY_PASSWORD" | gk add -insecure-password-stdin "$name" >/dev/null

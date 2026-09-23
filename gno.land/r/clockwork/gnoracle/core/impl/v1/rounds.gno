@@ -14,7 +14,7 @@ func (*implV1) Submit(_ int, rlm realm, provider address, feedID, roundID uint64
 		panic("gnoracle: feed is not active")
 	}
 	p := core.GetProvider(feedID, provider)
-	if p == nil || p.Status != core.ProviderActive {
+	if p == nil || p.Status != core.ProviderActive || p.Slot < 0 {
 		panic("gnoracle: not an active provider of this feed")
 	}
 	if !f.Spec.ValidValue(value) {
@@ -27,6 +27,12 @@ func (*implV1) Submit(_ int, rlm realm, provider address, feedID, roundID uint64
 	}
 	if !sched.IsOpen(roundID, t) {
 		panic("gnoracle: round is closed")
+	}
+	// A provider owes and may serve rounds from ObligedFrom on: the round in
+	// progress at registration is not its to serve, and a submission outside
+	// the obliged set would break the round's eligible-versus-active count.
+	if p.ObligedFrom > roundID {
+		panic("gnoracle: obligations start at round " + u(p.ObligedFrom))
 	}
 	if f.HaveLast && roundID <= f.LastFinalized {
 		panic("gnoracle: round is finalised")
@@ -49,12 +55,7 @@ func (*implV1) Submit(_ int, rlm realm, provider address, feedID, roundID uint64
 
 func allSubmitted(f *core.Feed, rd *core.Round, roundID uint64) bool {
 	for s := 0; s < core.MaxSlots; s++ {
-		holder := f.SlotAt(s)
-		if holder == "" {
-			continue
-		}
-		p := core.GetProvider(f.ID, holder)
-		if p == nil || p.ObligedFrom > roundID {
+		if obligedHolder(f, s, roundID) == nil {
 			continue
 		}
 		if rd.SubmittedMask&(1<<uint(s)) == 0 {
@@ -62,6 +63,22 @@ func allSubmitted(f *core.Feed, rd *core.Round, roundID uint64) bool {
 		}
 	}
 	return true
+}
+
+// obligedHolder returns the provider that held slot s for round id and owed
+// it a submission, or nil. The slot log answers "who held it then", so a
+// provider that left after submitting is still counted and paid for that
+// round, and a newcomer whose obligations start later is not.
+func obligedHolder(f *core.Feed, s int, id uint64) *core.Provider {
+	holder := core.SlotHolderAt(f.ID, int64(s), id)
+	if holder == "" {
+		return nil
+	}
+	p := core.GetProvider(f.ID, holder)
+	if p == nil || p.ObligedFrom > id {
+		return nil
+	}
+	return p
 }
 
 // Finalize closes the next round once its window has passed.
@@ -151,21 +168,18 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 	subs.Values = make([]int64, core.MaxSlots)
 	subs.Present = make([]bool, core.MaxSlots)
 	obliged := 0
+	holders := make([]*core.Provider, core.MaxSlots)
 	for s := 0; s < core.MaxSlots; s++ {
-		submitted := rd.SubmittedMask&(1<<uint(s)) != 0
-		if submitted {
+		p := obligedHolder(f, s, id)
+		if p == nil {
+			continue // an empty slot, or a submission from outside the obliged set: not counted
+		}
+		holders[s] = p
+		obliged++
+		if rd.SubmittedMask&(1<<uint(s)) != 0 {
 			subs.Values[s] = rd.ValueAt(s)
 			subs.Present[s] = true
 		}
-		holder := f.SlotAt(s)
-		if holder == "" {
-			continue
-		}
-		p := core.GetProvider(f.ID, holder)
-		if p == nil || p.ObligedFrom > id {
-			continue
-		}
-		obliged++
 	}
 
 	// aggregate
@@ -197,16 +211,13 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 		})
 	}
 
-	// liveness: misses, strikes, jail
+	// liveness: misses, strikes, jail (for the holders of record)
 	for s := 0; s < core.MaxSlots; s++ {
-		holder := f.SlotAt(s)
-		if holder == "" {
+		p := holders[s]
+		if p == nil {
 			continue
 		}
-		p := core.GetProvider(f.ID, holder)
-		if p == nil || p.ObligedFrom > id {
-			continue
-		}
+		holder := p.Addr
 		submitted := rd.SubmittedMask&(1<<uint(s)) != 0
 		if submitted {
 			strikes, windowStart := p.Strikes, p.StrikeWindowStart
@@ -217,7 +228,7 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 				strikes++
 			}
 			st.ProviderSetCounters(f.ID, holder, 0, strikes, windowStart, p.LastSubmitted, p.HasSubmitted)
-			if strikes >= param("strikesToJail") {
+			if strikes >= param("strikesToJail") && f.SlotAt(s) == holder {
 				jail(st, f, holder, s, id)
 			}
 			continue
@@ -227,7 +238,7 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 		if funded {
 			missSlash(st, f, p, cranker)
 		}
-		if misses >= param("jailAfterMisses") {
+		if misses >= param("jailAfterMisses") && f.SlotAt(s) == holder {
 			jail(st, f, holder, s, id)
 		}
 	}
@@ -238,8 +249,8 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 	if tier != agg.TierEmpty {
 		status = core.RoundAggregated
 		for s := 0; s < core.MaxSlots; s++ {
-			if eligible&(1<<uint(s)) != 0 && f.SlotAt(s) != "" {
-				addrs = append(addrs, f.SlotAt(s))
+			if eligible&(1<<uint(s)) != 0 && holders[s] != nil {
+				addrs = append(addrs, holders[s].Addr)
 			}
 		}
 	}

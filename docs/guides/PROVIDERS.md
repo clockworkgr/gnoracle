@@ -51,7 +51,9 @@ gnoracle provider 1 <your address>           # status active, slot, obligedFrom
 
 Registration puts you in the active set at the next free slot. Your
 obligations start at `obligedFrom`: the round after the current one, so you
-are never penalised for a round that was already open.
+are never penalised for a round that was already open. The realm also
+rejects a submission to an earlier round (`obligations start at round N`);
+the agent reads `obligedFrom` and waits for it.
 
 ## 4. Configure the agent
 

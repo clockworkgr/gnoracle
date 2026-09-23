@@ -502,3 +502,83 @@ func TestJSONViews(cur realm, t *testing.T) {
 	uassert.True(t, strings.HasPrefix(core.Render(cross(cur), "disputes"), "# Disputes"))
 	uassert.Equal(t, "unknown dispute", core.Render(cross(cur), "dispute/999"))
 }
+
+// TestObligationsAndDepartures pins the rule that a round counts the slot
+// holders of record that owed it a submission: a newcomer cannot submit to
+// the round in progress at registration (its obligations start at the next
+// one), and a provider that leaves after submitting is still counted and
+// paid for that round. Before this rule a stray submission made the round
+// unfinalisable ("agg: malformed tier input") and stalled the feed.
+func TestObligationsAndDepartures(cur realm, t *testing.T) {
+	install(cur)
+	spec := priceSpec(600, 300, 1_000*gnot, 20_000, 100*gnot)
+	testing.SetRealm(testing.NewUserRealm(requester))
+	pay(105 * gnot)
+	id := core.ProposeFeed(cross(cur), spec)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.ActivateFeed(cross(cur), id)
+	for _, who := range []address{alice, bob} {
+		testing.SetRealm(testing.NewUserRealm(who))
+		pay(1_000 * gnot)
+		core.Register(cross(cur), id, "early bird")
+	}
+	f := core.GetFeed(id)
+	skip(f.StartAt - core.Now() + 1) // round 0 is open
+
+	// carol registers during round 0: obliged from round 1, and round 0 is not hers to serve
+	testing.SetRealm(testing.NewUserRealm(carol))
+	pay(1_000 * gnot)
+	core.Register(cross(cur), id, "latecomer")
+	uassert.Equal(t, uint64(1), core.GetProvider(id, carol).ObligedFrom)
+	testing.SetRealm(testing.NewUserRealm(carol))
+	nosend()
+	uassert.AbortsContains(t, cur, "obligations start at round 1", func() { core.Submit(cross(cur), id, 0, 1_000_000) })
+
+	// the two obliged providers complete round 0 and it finalises early
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	core.Submit(cross(cur), id, 0, 1_000_000)
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	core.Submit(cross(cur), id, 0, 1_001_000)
+	rd := core.GetRound(id, 0)
+	uassert.Equal(t, core.RoundAggregated, rd.Status)
+	uassert.Equal(t, "consensus", rd.Tier)
+	aliceBefore := core.GetProvider(id, alice).Rewards
+
+	// round 1: alice submits, then leaves; bob and carol complete the round
+	skip(600)
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	core.Submit(cross(cur), id, 1, 1_000_000)
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	core.RequestUnbond(cross(cur), id)
+	uassert.Equal(t, core.ProviderUnbonding, core.GetProvider(id, alice).Status)
+	uassert.Equal(t, int64(2), core.GetFeed(id).ActiveCount)
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	core.Submit(cross(cur), id, 1, 1_001_000)
+	testing.SetRealm(testing.NewUserRealm(carol))
+	nosend()
+	core.Submit(cross(cur), id, 1, 1_002_000)
+	rd = core.GetRound(id, 1)
+	uassert.Equal(t, core.RoundAggregated, rd.Status)
+	uassert.Equal(t, "consensus", rd.Tier)
+	uassert.Equal(t, uint64(1), core.GetFeed(id).LastFinalized)
+	uassert.True(t, core.GetProvider(id, alice).Rewards > aliceBefore) // paid as the holder of record
+	uassert.Equal(t, int64(0), core.GetProvider(id, alice).ConsecutiveMisses)
+
+	// round 2: alice is gone; bob and carol alone complete it
+	skip(600)
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	core.Submit(cross(cur), id, 2, 1_001_000)
+	testing.SetRealm(testing.NewUserRealm(carol))
+	nosend()
+	core.Submit(cross(cur), id, 2, 1_001_500)
+	uassert.Equal(t, core.RoundAggregated, core.GetRound(id, 2).Status)
+	uassert.Equal(t, int64(0), core.GetProvider(id, alice).ConsecutiveMisses) // not obliged any more
+	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
+}

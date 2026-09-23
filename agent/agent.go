@@ -119,6 +119,8 @@ type feedRunner struct {
 	refused map[uint64]bool
 	batch   int64     // current CatchUp batch (adaptive)
 	backoff time.Time // no crank attempts before this
+	obliged *uint64   // first round this provider owes (from the provider record)
+	slot    int       // slot the obligation was read for
 }
 
 func (r *feedRunner) loop(ctx context.Context) {
@@ -197,7 +199,26 @@ func (r *feedRunner) tick(ctx context.Context) error {
 		r.warnOnce("start", fmt.Sprintf("first round opens at %d (in %s)", f.StartAt, time.Duration(f.StartAt-now)*time.Second))
 		return nil
 	}
+	// obligations start at the round after registration; the realm rejects
+	// earlier submissions and the finalisation only counts obliged slots
+	if r.obliged == nil || r.slot != slot {
+		p, err := r.a.client.Provider(core, r.fc.ID, me)
+		if err != nil {
+			return err
+		}
+		from := p.ObligedFrom
+		r.obliged, r.slot = &from, slot
+	}
 	st := r.a.state.Feed(r.fc.ID)
+	if cur < *r.obliged {
+		r.warnOnce("obliged", fmt.Sprintf("obligations start at round %d (current %d); waiting", *r.obliged, cur))
+		if !r.fc.SkipFinalize {
+			if err := r.crank(ctx, f, sched, cur, now); err != nil {
+				r.log.Printf("crank: %v", err)
+			}
+		}
+		return nil
+	}
 
 	// 1. crank rounds that closed before the current one (or the current one
 	//    once closed) so the feed keeps moving and the tip is ours

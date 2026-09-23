@@ -441,9 +441,16 @@ Per hourly feed with 9 providers, steady-state growth is about 7.6 kB per day
   and 28; it must exceed a dispute window plus two voting rounds plus the
   appeal gap) minus any slash applied meanwhile. Unbonding stake stays
   slashable, which is what makes the dispute window meaningful.
-- `Submit(cur, feedID, roundID, value int64)`: Active provider, round open,
-  one submission per provider per round (resubmission inside the window
-  overwrites). Emits `Submitted`.
+- `Submit(cur, feedID, roundID, value int64)`: Active provider holding a
+  slot, round open and at or after the provider's `ObligedFrom` (the round in
+  progress at registration is not the newcomer's to serve), one submission per
+  provider per round (resubmission inside the window overwrites). Emits
+  `Submitted`. A round is judged against its slot holders of record (the slot
+  log, `SlotHolderAt`), so a provider that leaves after submitting is still
+  counted and paid for that round and a newcomer is not counted before its
+  first obliged round; without this rule an out-of-set submission made the
+  eligible count exceed the active count and the round unfinalisable (found
+  and fixed in the M5 soak).
 - Jail: `consecutiveMisses >= jailAfterMisses` (default 3; one-off feeds jail
   on the single miss). Jailed providers are out of the active set, earn
   nothing, keep their stake, and may `Unjail` after `jailCooldown` (24 h).
