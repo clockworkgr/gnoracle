@@ -1,0 +1,18 @@
+# The Go module pins github.com/gnolang/gno to the release the chain runs
+# (v1.2.0); its transitive dependencies are part of that pin and are not
+# bumped on their own. Only direct dependencies get update proposals.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    allow:
+      - dependency-type: direct
+    ignore:
+      - dependency-name: github.com/gnolang/gno
+    open-pull-requests-limit: 2
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
