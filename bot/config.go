@@ -84,7 +84,8 @@ var DefaultEvents = []string{
 	"DisputeOpened", "DisputeBallotOpened", "DisputeRolled", "AppealOpened", "DisputeDecided", "DisputeResolved",
 	"ProposalCreated", "ProposalStatus", "ProviderJailed", "ProviderSlashed", "ProviderEjected", "KourtDissent",
 	"FeedProposed", "FeedActivated", "FeedDeprecated", "FeedUnfunded", "FeedReopened",
-	"ReleaseAccepted", "ReleaseRolledBack", "Frozen", "AuthorityTransferred", "ParamChanged",
+	"ReleaseAccepted", "ReleaseRolledBack", "Frozen", "AuthorityProposed", "AuthorityTransferred", "AuthorityCancelled",
+	"ParamChanged", "ParamDefined", "IncentivePaid",
 	"UpgradeProposed", "UpgradeAccepted", "UpgradeRolledBack", "UpgradeFrozen", "UpgradeWithdrawn",
 }
 

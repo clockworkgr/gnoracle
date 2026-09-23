@@ -94,7 +94,11 @@ func install(cur realm) {
 	core.Accept(cross(cur), coreImplPath)
 	dao.Accept(cross(cur), daoImplPath)
 	kourt.Accept(cross(cur), kourtImpl)
-	core.TransferAuthorityShared(cross(cur), admin, daoPath)
+	core.ProposeAuthority(cross(cur), "anyof:"+string(admin)+"|"+daoPath)
+	skip(core.AuthorityTimelock + 5)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.ExecuteAuthority(cross(cur))
 	token.Transfer(cross(cur), alice, 1_000_000*pyth)
 	token.Transfer(cross(cur), bob, 1_000_000*pyth)
 	for _, v := range []int64{5_000 * gnot, 2_500 * gnot, 1_250 * gnot, 1_000 * gnot} {

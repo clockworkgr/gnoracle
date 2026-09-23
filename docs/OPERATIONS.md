@@ -17,7 +17,7 @@ on gnodev the same realms live under `gno.land/r/clockwork/gnoracle/...`.
 | `core` (permanent realm) | chain | feeds, rounds, providers, credits, disputes; holds every GNOT balance; proxies to `core/impl/vN` |
 | `dao` (permanent realm) | chain | PYTH staking, proposals, dispute ballots, treasury; proxies to `dao/impl/vN`; `dao/exec` is its self-upgrade trampoline |
 | `token` | chain | PYTH (GRC20), minter is the DAO |
-| `kourt` (permanent realm) | chain | mirrors resolved disputes to a Kourt court; `kourt/impl/v1` binds the stand-in `kourtdev`, `impl/v2` will bind the deployed Kourt |
+| `kourt` (permanent realm) | chain | mirrors resolved disputes to the DAO's court on Kourt; `kourt/impl/kourtv3` binds the deployed Kourt v3 realm (`gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3`), `kourt/impl/v1` binds the stand-in `kourtdev` on development chains |
 | `gnoracle-agent` | provider hosts | fetches, checks and submits values; finalises; claims |
 | `gnoracle-bot` | one shared host (anyone may run more) | announces events and deadlines, reminds members, cranks `CatchUp`, `ResolveDispute`, Kourt `Crank`, `SettleMember` |
 | `gnoracle` CLI | operators' machines | reads the `:json` views, sends every transaction, keeps commit-reveal salts |
@@ -44,10 +44,12 @@ make deploy NS=g1lnk... REMOTE=https://rpc.gno.land:443 CHAINID=gnoland-1 KEY=de
 namespace address, publishes the packages in dependency order and skips
 what is already live, so it is safe to re-run after a failure. Order: the
 pure packages, `core`, `core/impl/v1`, `token`, `dao`, `dao/impl/v1`,
-`dao/exec`, `kourt`. `kourt/impl/v1` binds the stand-in court and ships
-only together with `kourtdev` under `WITH_KOURTDEV=1` (dev and test chains);
-production waits for the release bound to the deployed Kourt (`kourt/impl/v2`,
-M6). `ONLY="r/clockwork/gnoracle/core/impl/v2"` publishes just a new release.
+`dao/exec`, `kourt`, `kourt/impl/kourtv3`. The mirror release imports the
+deployed Kourt v3 realm, so the script publishes it only when the target
+chain has that realm (mainnet does) and says so otherwise. `WITH_KOURTDEV=1`
+adds the stand-in `kourtdev` and its release `kourt/impl/v1` (development
+and test chains only). `ONLY="r/clockwork/gnoracle/core/impl/v2"` publishes
+just a new release.
 
 Funding: the permanent `core` realm alone simulates at about 152M gas and
 locks a refundable storage deposit of about 32 GNOT; the whole set needs
@@ -69,10 +71,17 @@ gnoracle call gno.land/r/$NS/gnoracle/dao Accept gno.land/r/$NS/gnoracle/dao/imp
 gnoracle status                            # prints the DAO's address, live paths, counts, chain time
 gnoracle call gno.land/r/$NS/gnoracle/token TransferMinter <dao address>
 gnoracle call gno.land/r/$NS/gnoracle/core SetParamStr kourtRealm gno.land/r/$NS/gnoracle/kourt
+gnoracle call gno.land/r/$NS/gnoracle/kourt Accept gno.land/r/$NS/gnoracle/kourt/impl/kourtv3
+gnoracle call gno.land/r/$NS/gnoracle/kourt EnsureCourt        # founds court "gnoracle" on Kourt while creation is free
+KV3=gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3
+gnoracle -send 20000000ugnot call $KV3 Buy gnoracle 0            # 20 GNOT of court coin to the deployer (a direct user call)
+gnoracle call $KV3 TransferCC gnoracle <mirror address> 40000000 # 40 CC into the float (the mirror address is `address` on the kourt line of `gnoracle status`)
 ```
 
-The Kourt mirror's release is accepted once one bound to the deployed Kourt
-exists (M6). Then the genesis distribution (plan §9.1: 40% treasury, 25%
+`EnsureCourt` refuses, with instructions, while Kourt charges a
+court-creation burn: then found the court from an account with `StartCourt
+gnoracle "Gnoracle disputes"` on the Kourt realm, sending the burn, and run
+`EnsureCourt` again. Then the genesis distribution (plan §9.1: 40% treasury, 25%
 incentives, 20% liquidity, 15% founders) with `token Transfer`, the founders'
 vesting with `dao SetVesting <member> <until> <floor>` (authority) or a
 `vesting` proposal later, and the first parameter tuning by `SetParam` while
@@ -87,17 +96,34 @@ suites and publishes the image; the soak needs a chain and stays manual).
 ### Authority handover
 
 The guardian is a single key until enough members have staked (the plan's
-threshold is `guardianHandoverMembers`, 25; the step itself is manual).
-Handover is `core TransferAuthorityShared <guardian> <dao path>` first (both
-may act for a period), the same on `kourt`, then `TransferAuthorityToRealms
-<dao path>` on both (DAO only; the realms refuse a list without the DAO), and
-on the DAO `TransferAuthorityToExec` so the DAO can upgrade itself through
-`dao/exec`. Each step emits `AuthorityTransferred`; the bot posts them.
-Freezing a realm is refused while a key still holds its authority.
+threshold is `guardianHandoverMembers`, 25; the step itself is a policy the
+guardian follows, verifiable on chain). Every authority transfer is two
+steps seven days apart: `ProposeAuthority <spec>` records and announces the
+new authority, `ExecuteAuthority` applies it once `AuthorityTimelock` has
+passed, `CancelAuthority` drops it before that. The spec is one line:
+`addr:<address>`, `realms:<path>[,<path>]` or `anyof:<address>|<paths>`; a
+spec that names realms must include the DAO (on the DAO itself, the exec
+trampoline), so a typo cannot leave a realm ungoverned.
+
+Handover, in order, each step proposed then executed after the delay:
+
+1. `core ProposeAuthority anyof:<guardian>|<dao path>`, then `ExecuteAuthority`
+   (both may act for the overlap); the same on `kourt`.
+2. `core ProposeAuthority realms:<dao path>` and the same on `kourt` (DAO
+   only). After the guardian is dropped, the DAO executes these through
+   `authority-transfer` and `authority-execute` proposals.
+3. On the DAO, an `authority-transfer dao realms:<exec path>` proposal, then
+   after the delay an `authority-execute dao` proposal, so only the DAO's own
+   votes govern its releases from then on.
+
+Each step emits `AuthorityProposed`, `AuthorityTransferred` or
+`AuthorityCancelled`; the bot posts them. Freezing a realm is refused while
+a key still holds its authority. An `authority-execute` proposal opens once
+the seven-day delay has passed, since its own execution window is limited.
 
 ## 3. Upgrading a realm
 
-1. Deploy the new implementation (`core/impl/v2`, `dao/impl/v2`, `kourt/impl/v2`)
+1. Deploy the new implementation (`core/impl/v2`, `dao/impl/v2`, a new `kourt/impl/<binding>`)
    with `ONLY="r/clockwork/gnoracle/core/impl/v2" make deploy ...`; its `init`
    proposes it. The `:releases` page (or `vm/qeval '<permanent>.PendingPaths()'`)
    shows it as pending.
@@ -108,6 +134,10 @@ Freezing a realm is refused while a key still holds its authority.
    handover a DAO proposal of kind `upgrade-accept` with payload `core <path>`,
    `dao <path>` or `kourt <path>` (7-day timelock, `upgradeTimelock`), executed
    with `gnoracle execute <id>`. `ReleaseAccepted` is emitted and posted.
+   A release may add operations (`Invoke <method> <args>` on the permanent
+   realm), attach data to objects (notes) and define governed parameters
+   without any permanent change; new money categories are the one thing
+   that still needs a permanent redeploy.
 4. Watch `gnoracle health` (both realms' conservation checks must read `ok`)
    and the agents' logs for one full round cycle.
 5. Roll back with `Rollback` (or an `upgrade-rollback` proposal) if anything
@@ -115,12 +145,26 @@ Freezing a realm is refused while a key still holds its authority.
 6. `Freeze` ends upgradeability for good. Do not call it before the audit
    closes.
 
-`kourt/impl/v2` (to be written at M6) is the release that binds the deployed
-Kourt realm instead of `kourtdev`; its acceptance needs the DAO's court
-founded there first (`EnsureCourt`) and court coin bought into the mirror
-realm's float (`Buy` on Kourt, then `TransferCC` to the mirror's address).
-Records filed under the stand-in binding cannot be advanced by it; the
-authority closes them with `Abandon` (or a `kourt-abandon` proposal).
+`kourt/impl/kourtv3` is the production mirror release, bound to the deployed
+Kourt v3 realm; `kourt/impl/v1` binds the stand-in for development chains,
+and a release for another Kourt generation is a new directory under
+`kourt/impl/` named after it. Each record remembers the binding it was filed
+under; a release bound elsewhere refuses to advance it, and the authority
+closes such records with `Abandon` (or a `kourt-abandon` proposal). Claims
+that die unanswered on the bound court are closed by the release itself.
+
+**The Kourt float.** `kourt:json/now` reports the mirror's court coin as
+`float` (held) and `spendable` (not staked). A claim in flight needs about
+4 CC (a 1 CC deposit plus a 10% fee, a stake of twice the answerability
+floor, currently 2 CC, and the answer bond of about 6% of the stake); the
+deposit, fee and stake return when the claim settles, the bond too unless
+Kourt's vote overturns the answer. Top up by buying coin on the Kourt realm
+from any account (`Buy gnoracle 0` with GNOT sent) and moving it with
+`TransferCC gnoracle <mirror address> <amount>`. `Invoke reclaim <dispute>`
+pulls the emission Kourt grants a settled claim's author, answerer and
+winning stake into the float (anyone may run it). `RedeemFloat <amount>`
+(authority) converts excess coin back to GNOT and sends it to the treasury;
+the bot posts every `FloatRedeemed`.
 
 ## 4. Running the bot
 

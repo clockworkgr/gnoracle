@@ -16,7 +16,8 @@ type trampoline struct{}
 // Instance returns the trampoline object (for tests that stand in for init).
 func Instance() dao.Trampoline { return trampoline{} }
 
-// Run applies op ("accept", "rollback", "freeze", "authority") to the DAO's
+// Run applies op ("accept", "rollback", "freeze", "authority",
+// "authority-execute", "authority-cancel") to the DAO's
 // own proxy. Only the DAO realm may call it.
 func (trampoline) Run(cur realm, op, path string) {
 	if !cur.IsCurrent() || cur.Previous().PkgPath() != dao.SelfPath() {
@@ -30,7 +31,11 @@ func (trampoline) Run(cur realm, op, path string) {
 	case "freeze":
 		dao.Freeze(cross(cur))
 	case "authority":
-		dao.TransferAuthorityToExec(cross(cur))
+		dao.ProposeAuthority(cross(cur), path)
+	case "authority-execute":
+		dao.ExecuteAuthority(cross(cur))
+	case "authority-cancel":
+		dao.CancelAuthority(cross(cur))
 	default:
 		panic("exec: unknown op " + op)
 	}

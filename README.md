@@ -100,8 +100,9 @@ by vote.
   every run.
 - **Upgradeable, but not silently.** State and funds live in permanent
   realms; the logic runs behind a proxy that a guardian key, and later the
-  DAO by vote with a seven-day delay, can replace or roll back. Every
-  change of release is a public event.
+  DAO by vote with a seven-day delay, can replace or roll back. Handing the
+  keys over is itself a two-step move with a seven-day delay that anyone
+  can see. Every change of release or authority is a public event.
 - **A court of record.** Verdicts are mirrored into Kourt, where the
   community there can contest them; a disagreement is recorded as dissent
   for everyone to see.
@@ -123,7 +124,8 @@ On the chain (gno.land realms):
   the GNOT they involve.
 - **dao**: PYTH staking, proposals, dispute ballots, the treasury.
 - **token**: PYTH itself.
-- **kourt**: the mirror that files verdicts in Kourt.
+- **kourt**: the mirror that files verdicts in the DAO's court on Kourt
+  (the deployed Kourt v3 realm).
 
 Each realm has web pages (feeds, rounds, disputes, members, proposals,
 health) and machine-readable views the tools use.

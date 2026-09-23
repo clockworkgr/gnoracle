@@ -1,6 +1,8 @@
 package core
 
 import (
+	"strconv"
+
 	"gno.land/p/clockwork/gnoracle/params/v0"
 )
 
@@ -27,6 +29,7 @@ func defineParams() {
 	def("retentionAfterDeprecate", "seconds after deprecation before a feed may be pruned", 90*24*3600, 30*24*3600, 730*24*3600, 5000)
 	def("deadFeedRounds", "consecutive empty rounds after which a feed is deprecated on prune", 168, 24, 10_000, 5000)
 	def("renderDelay", "seconds a final value must age before free views show it", 600, 0, 24*3600, 5000)
+	def("maxIncentivePay", "largest fee-pool payment a release may make per call (tips, bounties)", 10*gnot, 0, 1000*gnot, 5000)
 	def("trustedOneOffCap", "largest declared value at stake a trusted requester may self-activate", 50_000*gnot, 0, 10_000_000*gnot, 5000)
 	// providers
 	def("missSlashBps", "slash per missed round on a funded feed", 50, 0, 500, 5000)
@@ -78,4 +81,25 @@ func SetParamStr(cur realm, name, value string) {
 		panic(err.Error())
 	}
 	emit("ParamChanged", "name", name, "old", old, "new", value)
+}
+
+// DefineParam lets a release add a governed integer parameter with bounds
+// (plan §3.2); an existing name is left as it is.
+func (r *StateRef) DefineParam(name, doc string, def, lo, hi, changeBps int64) {
+	r.check()
+	if registry.Has(name) {
+		return
+	}
+	registry.Define(params.Def{Name: name, Doc: doc, Default: def, Min: lo, Max: hi, MaxChangeBps: changeBps})
+	emit("ParamDefined", "name", name, "default", strconv.FormatInt(def, 10))
+}
+
+// DefineParamStr lets a release add a governed text parameter.
+func (r *StateRef) DefineParamStr(name, doc, def string) {
+	r.check()
+	if registry.Has(name) {
+		return
+	}
+	registry.DefineString(name, doc, def)
+	emit("ParamDefined", "name", name, "default", def)
 }

@@ -237,3 +237,9 @@ func indexByte(s string, c byte) int {
 	}
 	return len(s)
 }
+
+// Invoke: this release defines no operations beyond the DAO API.
+func (*implV1) Invoke(_ int, rlm realm, caller address, userCall bool, sent int64, method, args string) string {
+	dao.Store(0, rlm)
+	panic("dao: unknown method " + method)
+}

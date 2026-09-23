@@ -94,8 +94,10 @@ gnoracle propose param "core.readPriceFloor=3000" "Raise the read floor" 20gnot
 
 Kinds: `feed-accept`, `feed-update`, `feed-deprecate`, `provider-remove`,
 `param`, `treasury`, `mint`, `upgrade-accept`, `upgrade-rollback`, `freeze`,
-`authority-transfer` (each of the last four names `core`, `dao` or `kourt`),
-`trusted-requester`, `vesting`, `kourt-abandon`, `text`. Each has its own
+`authority-transfer`, `authority-execute`, `authority-cancel` (each of the
+last six names `core`, `dao` or `kourt`; an authority transfer executes in a
+second proposal after the realm's seven-day delay), `trusted-requester`,
+`vesting`, `kourt-abandon`, `text`. Each has its own
 quorum, threshold, voting period and timelock (plan §8.3); a proposal carries
 when strictly more than the bar votes yes. To open one you hold 0.25% of the
 staked supply or attach a 20 GNOT deposit, refunded when the vote reaches

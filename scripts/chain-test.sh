@@ -38,7 +38,8 @@ plain_call() { # key fn args...
 }
 
 "$here/scripts/dev-keys.sh" >/dev/null
-if ! gk list 2>/dev/null | grep -q ' prov2 '; then
+keys="$(gk list 2>/dev/null || true)"
+if ! grep -q ' prov2 ' <<<"$keys"; then
   step "creating a second key (prov2)"
   printf '%s\n%s\n' "$GNOKEY_PASSWORD" "$GNOKEY_PASSWORD" | gk add -insecure-password-stdin prov2 >/dev/null
 fi
@@ -134,18 +135,25 @@ step "a text proposal and a vote (voting weight activates next epoch, so this ma
 KEY=test1 tx call -pkgpath "$DAO" -func Propose -args text -args "hello" -args "First proposal" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
 echo "proposals: $(qeval "$DAO.ProposalCount()")"
 
-step "Kourt mirror: accept its implementation, found the court, fund the float"
+step "Kourt mirror: accept the Kourt v3 release, found the court, fund the float"
+# gnodev serves the deployed Kourt v3 source mirrored under deps/ at its
+# mainnet path, so this is the production release against the real court code.
 KOURT="gno.land/r/$NS/gnoracle/kourt"
-KDEV="gno.land/r/$NS/gnoracle/kourtdev"
-KIMPL="$KOURT/impl/v1"
+KV3="${KOURT_V3:-gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3}"
+KIMPL="$KOURT/impl/kourtv3"
 if [ "$(qeval "$KOURT.LivePath()")" != "(\"$KIMPL\" string)" ]; then
   KEY=test1 tx call -pkgpath "$KOURT" -func Accept -args "$KIMPL" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
 fi
+echo "court creation burn (ugnot): $(qeval "$KV3.CourtCreationBurn()")"
 KEY=test1 tx call -pkgpath "$KOURT" -func EnsureCourt -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "court exists: $(qeval "$KV3.Exists(\"gnoracle\")")"
 KADDR="$(qeval "$KOURT.Address()" | grep -oE 'g1[0-9a-z]{38}' | head -1)"
-KEY=test1 tx call -pkgpath "$KDEV" -func Buy -args gnoracle -args 0 -send 10000000ugnot -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
-KEY=test1 tx call -pkgpath "$KDEV" -func TransferCC -args gnoracle -args "$KADDR" -args 10000000 -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
-echo "mirror float (CC): $(qeval "$KDEV.CoinBalanceOf(\"gnoracle\", \"$KADDR\")")"
+# Buy must be a direct user call; 10 GNOT on a fresh curve mints about 141 CC
+KEY=test1 tx call -pkgpath "$KV3" -func Buy -args gnoracle -args 0 -send 10000000ugnot -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "test1 court coin: $(qeval "$KV3.CoinBalanceOf(\"gnoracle\", \"$TEST1\")")"
+KEY=test1 tx call -pkgpath "$KV3" -func TransferCC -args gnoracle -args "$KADDR" -args 20000000 -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "mirror float (CC): $(qeval "$KV3.CoinBalanceOf(\"gnoracle\", \"$KADDR\")")"
+echo "mirror view: $(qrender "$KOURT" "json/now")"
 
 step "health and page"
 echo "$(qeval "$CORE.Health()")"

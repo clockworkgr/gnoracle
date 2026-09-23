@@ -7,10 +7,11 @@
 package params
 
 import (
-	"gno.land/p/clockwork/gnoracle/jsonw/v0"
 	"errors"
 	"strconv"
 	"strings"
+
+	"gno.land/p/clockwork/gnoracle/jsonw/v0"
 
 	"gno.land/p/nt/avl/v0"
 )

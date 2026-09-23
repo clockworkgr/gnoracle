@@ -90,20 +90,27 @@ staking).
 
 ## Deferred, with reasons
 
-- **`settleTipBps` and `guardianHandoverMembers`** are recorded but not
-  enforced: no settle tip is paid in v1 and the handover is a manual step.
-  Both are documented as reserved.
-- **Extensions are state-only.** A future extension that must move coins
-  needs a crossing `Extend(cur, fn)` pattern in the permanent realms; none
-  is planned before M7.
+- **`settleTipBps`** is recorded but no tip is paid in v1; a release can pay
+  one from the treasury with the existing primitives.
+- **`guardianHandoverMembers`** stays a published policy: every authority
+  transfer is now a two-step, timelocked operation (`ProposeAuthority`,
+  seven days, `ExecuteAuthority`) that anyone can see and the authority can
+  cancel, which is the enforceable part; a member-count floor would trap
+  the guardian if the community stalled.
+- **Extensions were removed** rather than completed: the state gate admits
+  the permanent realm alone, and releases add operations, data and
+  parameters through `Invoke`, notes and `DefineParam` instead.
 - **The inflow guard has no rogue-implementation test.** It is exercised by
   the money paths of every story, but a filetest that registers a malicious
   release and watches it fail belongs in the audit preparation (M7).
-- **Kourt v2 binding.** The real Kourt's answer gate runs from the stake
-  time, its answer stake floor is dynamic, a contested claim has a post-vote
-  finalisation, and dead claims forfeit after twelve weeks. The permanent
-  realm now has `Abandon` for stuck records; the release bound to the real
-  Kourt must model those clocks (M6 checklist in `docs/OPERATIONS.md`).
+- **Kourt v3 binding.** Closed after the review: `kourt/impl/kourtv3` binds
+  the deployed Kourt v3 realm and models its clocks (three epochs of stake
+  history sealed by a top-up, the dynamic answer floor, the priority window,
+  the 72 h settle, vote then escrow then `Finalize`, dead claims closed as
+  abandoned with the stake taken back), tested against the realm's mirrored
+  source including an overturn and an upheld vote. What remains is
+  operational: the float has to be funded from an account (`Buy` is a
+  direct user call on Kourt) and watched (`docs/OPERATIONS.md` §3).
 - **Attribution.** The mirror shows the "built on Kourt" text link on every
   page; whether the licence's badge image is required on gnoweb is a question
   for the licence holder before M6.

@@ -54,7 +54,9 @@ for name in ${EXTRA_KEYS:-}; do
 done
 for n in $(seq 1 $((AGENTS - 1 - $(echo ${EXTRA_KEYS:-} | wc -w)))); do
   name="soak$n"
-  if ! gk list 2>/dev/null | grep -q " $name "; then
+  # capture first: with pipefail, grep -q closing the pipe early would make gnokey's SIGPIPE look like "not found"
+  keys="$(gk list 2>/dev/null || true)"
+  if ! grep -q " $name " <<<"$keys"; then
     printf '%s\n%s\n' "$GNOKEY_PASSWORD" "$GNOKEY_PASSWORD" | gk add -insecure-password-stdin "$name" >/dev/null
   fi
   addr="$(gk list 2>/dev/null | grep -A1 " $name " | grep -oE 'g1[0-9a-z]{38}' | head -1)"

@@ -47,14 +47,14 @@ const (
 	MaxSubmitWindowOneOff = int64(30 * 24 * 3600)
 	// MaxAmount bounds every ugnot amount in a spec (1e15 ugnot, one billion
 	// GNOT) so basis-point arithmetic on it cannot overflow int64.
-	MaxAmount = int64(1_000_000_000_000_000)
-	MinResolveLead    = int64(3600)
-	MaxResolveLead    = int64(2 * 365 * 24 * 3600)
-	MinToleranceBps   = int64(1)
-	MaxToleranceBps   = int64(5000)
-	MaxQuarantineBps  = int64(10_000)
-	MaxTags           = 8
-	MaxTagLen         = 32
+	MaxAmount        = int64(1_000_000_000_000_000)
+	MinResolveLead   = int64(3600)
+	MaxResolveLead   = int64(2 * 365 * 24 * 3600)
+	MinToleranceBps  = int64(1)
+	MaxToleranceBps  = int64(5000)
+	MaxQuarantineBps = int64(10_000)
+	MaxTags          = 8
+	MaxTagLen        = 32
 )
 
 // Limits are the DAO-level floors the spec must clear; they live in the DAO's

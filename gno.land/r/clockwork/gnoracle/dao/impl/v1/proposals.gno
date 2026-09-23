@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 
+	"gno.land/p/clockwork/gnoracle/authspec/v0"
+
 	"gno.land/r/clockwork/gnoracle/core"
 	"gno.land/r/clockwork/gnoracle/dao"
 	"gno.land/r/clockwork/gnoracle/token"
@@ -37,6 +39,8 @@ func kindRules(kind string) (rules, bool) {
 		return rules{1500, 5000, day, 0}, true
 	case "freeze", "authority-transfer":
 		return rules{3000, 7500, 14 * day, 7 * day}, true
+	case "authority-execute", "authority-cancel":
+		return rules{2000, 5000, 3 * day, 0}, true
 	case "trusted-requester", "kourt-abandon":
 		return rules{2000, 5000, 5 * day, 0}, true
 	case "vesting":
@@ -290,9 +294,21 @@ func validatePayload(kind, payload string) {
 	case "authority-transfer":
 		f := fields(payload, 2)
 		parseRealm(f[0])
-		if (f[0] == "core" || f[0] == "kourt") && (len(f) < 2 || f[1] == "") {
-			panic("dao: authority-transfer " + f[0] + " needs a comma-separated list of realm paths")
+		if len(f) < 2 || f[1] == "" {
+			panic("dao: authority-transfer needs <core|dao|kourt> <authspec>")
 		}
+		if _, err := authspec.Parse(f[1]); err != nil {
+			panic("dao: " + err.Error())
+		}
+		// the same rules the realms apply, checked before anyone votes
+		if f[0] == "dao" && !authspec.Grants(f[1], dao.ExecPath) {
+			panic("dao: the DAO's authority must include " + dao.ExecPath)
+		}
+		if f[0] != "dao" && authspec.Kind(f[1]) != "addr" && !authspec.Grants(f[1], dao.SelfPath()) {
+			panic("dao: a realm authority for " + f[0] + " must include " + dao.SelfPath())
+		}
+	case "authority-execute", "authority-cancel":
+		parseRealm(fields(payload, 1)[0])
 	case "kourt-abandon":
 		f := fields(payload, 2)
 		parseUint(f[0], "dispute id")
@@ -420,11 +436,29 @@ func apply(st *dao.StateRef, p *dao.Proposal) {
 		f := fields(p.Payload, 2)
 		switch f[0] {
 		case "core":
-			st.CoreTransferAuthority(f[1])
+			st.CoreProposeAuthority(f[1])
 		case "kourt":
-			st.KourtTransferAuthority(f[1])
+			st.KourtProposeAuthority(f[1])
 		default:
-			st.ExecOwn("authority", "")
+			st.ExecOwn("authority", f[1])
+		}
+	case "authority-execute":
+		switch fields(p.Payload, 1)[0] {
+		case "core":
+			st.CoreExecuteAuthority()
+		case "kourt":
+			st.KourtExecuteAuthority()
+		default:
+			st.ExecOwn("authority-execute", "")
+		}
+	case "authority-cancel":
+		switch fields(p.Payload, 1)[0] {
+		case "core":
+			st.CoreCancelAuthority()
+		case "kourt":
+			st.KourtCancelAuthority()
+		default:
+			st.ExecOwn("authority-cancel", "")
 		}
 	case "kourt-abandon":
 		f := fields(p.Payload, 2)

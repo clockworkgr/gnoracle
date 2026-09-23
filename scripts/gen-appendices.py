@@ -9,7 +9,7 @@ PLAN = os.path.join(ROOT, "docs", "IMPLEMENTATION_PLAN.md")
 REALMS = [("core", "gno.land/r/clockwork/gnoracle/core"), ("dao", "gno.land/r/clockwork/gnoracle/dao"),
           ("kourt", "gno.land/r/clockwork/gnoracle/kourt"), ("token", "gno.land/r/clockwork/gnoracle/token")]
 IMPLS = {"core": "gno.land/r/clockwork/gnoracle/core/impl/v1", "dao": "gno.land/r/clockwork/gnoracle/dao/impl/v1",
-         "kourt": "gno.land/r/clockwork/gnoracle/kourt/impl/v1"}
+         "kourt": "gno.land/r/clockwork/gnoracle/kourt/impl/kourtv3"}
 UNITS = {"gnot": 1_000_000, "pyth": 1_000_000}
 
 

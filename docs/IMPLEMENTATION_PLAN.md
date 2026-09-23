@@ -151,7 +151,8 @@ gnoracle/
   r/dao/         gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/dao             # PERMANENT: interface, state, gated store, proxy, entry points
                  gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/dao/impl/v1     # implementation: staking, proposals, ballots, penalties, treasury
   r/kourt/       gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/kourt           # PERMANENT: record state, court-coin float, proxy
-                 gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/kourt/impl/v1   # implementation bound to one Kourt realm path
+                 gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/kourt/impl/kourtv3  # implementation bound to the deployed Kourt v3 realm
+                 gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/kourt/impl/v1   # development release bound to the stand-in kourtdev
   agent/                                      # Go: provider daemon (gnoclient), source adapters
   bot/                                        # Go: dispute and deadline notifier, cranker (Telegram; reuses telegram-bots)
   sim/                                        # Go: economic simulation over the parameter table
@@ -197,10 +198,21 @@ deploy of the same source under the same address).
   permanent realm and are not upgradeable. Implementations request movements
   through `StateRef`; they never see a banker or a `cur`.
 - **Proxy and authority.** `proxy = upgradeable.New(upgradeable.NewAddrAuthority(guardian))`
-  at bootstrap on `core` and `kourt`; `TransferAuthorityShared(guardian, daoPath)`
-  widens it to `AnyOf(guardian, dao)` for the handover overlap and
-  `TransferAuthorityToRealms(daoPath)` leaves the DAO alone. The DAO's own
-  proxy starts as `AnyOf(guardian, exec)`. Implementation realms are nested (`core/impl/v1`), so the
+  at bootstrap on `core` and `kourt`; the DAO's own proxy starts as
+  `AnyOf(guardian, exec)`. Authority moves in two steps seven days apart
+  (`ProposeAuthority(spec)`, `ExecuteAuthority()`, cancellable in between;
+  `AuthorityTimelock` is a constant so the holder cannot shorten it), and a
+  spec naming realms must include the DAO (the exec trampoline on the DAO).
+  There are no extension realms: the state gate admits the permanent realm's
+  own frame only, and a release that needs more surface uses the hooks below.
+- **Release hooks.** Three permanent entry points keep the permanent surface
+  final: `Invoke(cur, method, args)` forwards operations a release defines
+  beyond the interface (new user-facing operations ship as release code);
+  `SetNote`/`Note` attach release-defined data to any object by kind and id
+  (fields the permanent structs do not have); `DefineParam`/`DefineParamStr`
+  add governed parameters with bounds; `FeesPay` pays bounded incentives
+  from the fee pool (`maxIncentivePay`). After deployment only a new money
+  category needs a permanent redeploy. Implementation realms are nested (`core/impl/v1`), so the
   default `New` (nested only) applies. An implementation registers itself in
   its `init`: `core.RegisterImpl(cross(cur), &implV1{})`, which calls
   `proxy.Propose`. Acceptance is `core.Accept(cross(cur), path)` executed by a
@@ -708,19 +720,30 @@ Pending ──OpenClaimP (CC deposit + fee)──► Filed ──Stake(verdict s
   the realm address by DAO proposal; `Redeem` unwinds excess on a two-way
   court.
 - The court: founded by the realm itself while Kourt's court-creation burn is
-  zero (`StartCourt` then accepts a realm caller), slug `gnoracle`. If the
-  burn is non-zero at deploy time an operator founds it and appoints the
-  realm address as moderator.
-- Which Kourt: decided. An import path is compile-time. `kourt/impl/v1` binds
-  the local stand-in `gno.land/r/clockwork/gnoracle/kourtdev` (same entry
-  points and timings, no coin vote) so the mirror is testable on gnodev;
-  `kourt/impl/v2` targets the v3 realm at
-  `gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3` (the
-  deployment with `Redeem`). If kourt.xyz keeps pointing at the v2 realm at
-  `gno.land/r/g1ecsuj0q572jr0dhu29q9njtnmw03hyu7tyyvv6/kourt`, a
-  `kourt/impl/v2` against it is a one-file change accepted through the proxy.
-  Confirm with Jae Kwon before M4 which one he considers production. pearl-1
-  has Kourt realms for the testnet rehearsal.
+  zero (`StartCourt` then accepts a realm caller), slug `gnoracle`. Kourt
+  takes a non-zero burn only from a direct user call, so if the burn is set
+  when the mirror goes live an account founds the court instead (any
+  account: the mirror needs no right on it, and `EnsureCourt` says so).
+- Which Kourt: decided and built. An import path is compile-time, so each
+  mirror release binds one Kourt realm. `kourt/impl/kourtv3` binds the
+  deployed Kourt v3 realm `gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3`
+  (the two-way deployment with `Redeem`) and is the production release; its
+  tests run against that realm's mirrored source, and gnodev serves the same
+  source at the same path. `kourt/impl/v1` binds the local stand-in
+  `gno.land/r/clockwork/gnoracle/kourtdev` for chains without Kourt. The v3
+  release models Kourt's clocks rather than assuming them: an answer needs
+  three epochs of stake history, which only advances when a stake is
+  observed, so the mirror seals it with a one-unit top-up two epochs after
+  staking; the answerability floor is 0.10% of the court's supply (min
+  1 CC) and the mirror stakes twice what it sees, lifting the average if
+  the court grew; the qualified answerers' 24 h priority window is waited
+  out; an undisputed answer settles after 72 h; a disputed one goes through
+  a one-week coin vote, an escrow of at least a week (reopenable) and
+  `Finalize`; a claim unanswered for twelve weeks dies and the record closes
+  as abandoned with the stake taken back. Every wait is read from Kourt's
+  own `ClaimTimeline`, so a test clock armed on a development chain drives
+  the mirror too. A release for another Kourt generation is a new directory
+  under `kourt/impl/` named after it, accepted through the proxy.
 - Licence: pages that show a Kourt claim or court carry the "built on Kourt"
   attribution linked to kourt.xyz (RESEARCH §2.6). No Kourt code is copied.
 
@@ -869,9 +892,10 @@ window's fee share to the treasury (§9.4).
   powers are those of the proxy authority: activate, update and deprecate
   feeds, set parameters (at most ±50% per change and once per block), eject
   providers, accept or roll back releases, and hand the authority over.
-  There is no pause: a mistaken release is rolled back, not paused. The
-  realms refuse a realm-only authority that leaves the DAO out, and refuse
-  to freeze while a key still holds the authority. The trust statement in
+  There is no pause: a mistaken release is rolled back, not paused. Every
+  authority transfer is proposed, announced and executed seven days later;
+  the realms refuse a realm-only authority that leaves the DAO out, and
+  refuse to freeze while a key still holds the authority. The trust statement in
   the docs says so plainly: until handover one key governs the realms. The
   DAO executes `authority-transfer` to `NewRealmAuthority(daoPath)` on all
 - `core` ugnot balance ≥ Σ provider stakes (active + unbonding) + Σ credits +
@@ -1055,9 +1079,9 @@ parallel by a second person from M3.
 | M1 | Pure packages | `spec`, `agg`, `rounds`, `ledger`, `checkpoint`, `tally`, `params` with unit tests and gas pins | every invariant in §10.2 has a test; simulation skeleton | **done 2026-09-23** (the `// Gas:` filetest pins move to M6; the economics tables are `docs/SIMULATION.md`) |
 | M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **done 2026-09-23**: realms and realm tests, `make chain-test` lifecycle on gnodev, the `impl/v2` accept-and-rollback rehearsal in `upgrade_test.gno`, and the multi-agent soak (`make agent-soak`, five-minute runs; the 48 h soak is part of the M6 testnet criteria) |
 | M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
-| M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages). Binding `kourt/impl/v2` to a deployed Kourt and the notifier bot's cranking move to M5/M6 |
+| M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages); the bot's cranking landed in M5 and the production release `kourt/impl/kourtv3`, bound to the deployed Kourt v3 realm and tested against its source (undisputed settle, overturn recorded as dissent, upheld vote as confirmed, redeem to the treasury), on 2026-09-23 |
 | M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`); `make agent-soak` integration scenario; container image and CI publishing to ghcr.io. Open: the acceptance run by two outside testers from the docs alone; **reviewed 2026-09-23**: eight-area code and documentation review, findings and fixes in `docs/REVIEW.md` |
-| M6 | Testnet | deploy to `pearl-1`, found the court on the pearl-1 Kourt realm (`gno.land/r/g13khfsjnnq6g3lz2e997jejc9kvlz2x5yx08dr0/kourt2`, generation to confirm), soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback | soak criteria in §13 met | 5 wk |
+| M6 | Testnet | deploy to `pearl-1`, soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback; the Kourt mirror is rehearsed on gnodev against the mirrored Kourt v3 source (pearl-1 has no Kourt v3 realm; its `kourt`/`kourt2` realms are another generation), or against a copy of the v3 source deployed under our namespace with a release bound to it | soak criteria in §13 met | 5 wk |
 | M7 | Audit and mainnet | external audit, fixes, mutation run, mainnet `addpkg` approvals, PYTH genesis distribution, Gnoswap pool, first feeds (gnomarket outcomes, GNOT/USD), guardian handover scheduled | audit findings closed; at least 25 stakers | 6 wk + audit lead time |
 
 About 5.5 months to mainnet, of which the last two are testnet and audit. M2
@@ -1102,7 +1126,7 @@ Resolved with the owner on 2026-09-23:
 | Stake denomination | native ugnot for stakes, bonds and credits; `stakeDenom` kept for a fresh deploy if the transfer lock returns | §3.2, §15 |
 | Namespace | address namespace `gno.land/{p,r}/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/...`, as Kourt did; no name registration needed | §3.1 |
 | Upgrade mechanism | `gno.land/p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/upgradeable/v0`, permanent realms with nested `impl/vN` | §3.2 |
-| Kourt target | v3 realm `gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3` first; v2 adapter if kourt.xyz stays on v2; confirm with Jae Kwon before M4 | §7.4 |
+| Kourt target | the v3 realm `gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3`, bound by the release `kourt/impl/kourtv3`; another generation would be a new release directory accepted through the proxy | §7.4 |
 | gnomarket requests | allowlisted trusted requesters activate one-off feeds without a vote under `trustedOneOffCap` | §4.2, §6.3, §8.3 |
 | Guardian | single key (the deployer's) until handover at 25 staked members | §8.6 |
 | Token | `Pythia` / `PYTH`, 6 decimals, 100,000,000 at genesis, 120,000,000 hard cap (mint by vote, 2%/yr), 40% treasury / 25% incentives / 20% liquidity / 15% founders (12 m cliff, 36 m vest via `SetVesting` or a `vesting` proposal) | §8.1, §9.1 |
@@ -1156,11 +1180,10 @@ func WithdrawImpl(cur realm, pkgPath string)
 func Rollback(cur realm)
 func Forget(cur realm)
 func Freeze(cur realm)
-func AddExtension(cur realm, pkgPath string)
-func DropExtension(cur realm, pkgPath string)
-func TransferAuthority(cur realm, newOwner address)
-func TransferAuthorityToRealms(cur realm, csvPaths string)
-func TransferAuthorityShared(cur realm, owner address, csvPaths string)
+func ProposeAuthority(cur realm, spec string) int64
+func ExecuteAuthority(cur realm)
+func CancelAuthority(cur realm)
+func Invoke(cur realm, method, args string) string
 func Render(cur realm, path string) string
 func RegisterDAO(cur realm, h BallotHouse)
 func ForwardFees(cur realm) int64
@@ -1170,13 +1193,13 @@ func SetParamStr(cur realm, name, value string)
 Views:
 
 ```go
+func PendingAuthority() (spec string, readyAt int64)
 func LiveImpl() any
 func LivePath() string
 func PendingPaths() []string
 func HistoryPaths() []string
 func Frozen() bool
 func Authority() string
-func Extensions() []string
 func SelfPath() string
 func HasDAO() bool
 func Held() (stakes, unbonding, credits, pools, rewards, bonds, feesPending, deposits int64)
@@ -1196,6 +1219,7 @@ func SponsorOf(feed uint64, consumer address) *Sponsorship
 func GetDispute(id uint64) *DisputeRecord
 func TrustedCap(pkgPath string) int64
 func SlotHolderAt(feed uint64, slot int64, r uint64) address
+func Note(kind, id, key string) string
 func FeedCount() uint64
 func DisputeCount() uint64
 func IterateFeeds(offset, count int, fn func(*Feed) bool)
@@ -1231,11 +1255,10 @@ func Rollback(cur realm)
 func WithdrawImpl(cur realm, pkgPath string)
 func Forget(cur realm)
 func Freeze(cur realm)
-func AddExtension(cur realm, pkgPath string)
-func DropExtension(cur realm, pkgPath string)
-func TransferAuthority(cur realm, newOwner address)
-func SetVesting(cur realm, member address, until, floor int64)
-func TransferAuthorityToExec(cur realm)
+func ProposeAuthority(cur realm, spec string) int64
+func ExecuteAuthority(cur realm)
+func CancelAuthority(cur realm)
+func Invoke(cur realm, method, args string) string
 func Render(cur realm, path string) string
 func RegisterTrampoline(cur realm, t Trampoline)
 ```
@@ -1244,6 +1267,7 @@ Views:
 
 ```go
 func Hooks() core.BallotHouse
+func PendingAuthority() (spec string, readyAt int64)
 func LiveImpl() any
 func LivePath() string
 func PendingPaths() []string
@@ -1279,6 +1303,7 @@ func IterateMembers(offset, count int, fn func(*Member) bool)
 func Store(_ int, rlm realm) *StateRef
 func TreasuryUgnot() int64
 func TreasuryPyth() int64
+func Note(kind, id, key string) string
 ```
 
 ### `gno.land/r/clockwork/gnoracle/kourt`
@@ -1295,7 +1320,11 @@ func Rollback(cur realm)
 func WithdrawImpl(cur realm, pkgPath string)
 func Forget(cur realm)
 func Freeze(cur realm)
-func TransferAuthorityToRealms(cur realm, csvPaths string)
+func ProposeAuthority(cur realm, spec string) int64
+func ExecuteAuthority(cur realm)
+func CancelAuthority(cur realm)
+func SetAttribution(cur realm, text string)
+func Invoke(cur realm, method, args string) string
 func Render(cur realm, path string) string
 ```
 
@@ -1307,6 +1336,8 @@ func Count() uint64
 func Address() address
 func SelfPath() string
 func Store(_ int, rlm realm) *StateRef
+func PendingAuthority() (spec string, readyAt int64)
+func Note(kind, id, key string) string
 func LivePath() string
 func PendingPaths() []string
 func Authority() string
@@ -1342,6 +1373,8 @@ Every `chain.Emit` in the permanent realms and their implementations, with attri
 | event | attributes |
 |---|---|
 | `AppealOpened` | `dispute`, `appellant`, `bond` |
+| `AuthorityCancelled` | `spec` |
+| `AuthorityProposed` | `spec`, `readyAt` |
 | `AuthorityTransferred` | `authority` |
 | `BondReleased` | `dispute`, `to`, `amount` |
 | `CreditDeposited` | `consumer`, `amount` |
@@ -1361,7 +1394,9 @@ Every `chain.Emit` in the permanent realms and their implementations, with attri
 | `FeedUpdated` | `feed` |
 | `FeesForwarded` | `to`, `amount` |
 | `Frozen` | (none) |
+| `IncentivePaid` | `to`, `amount` |
 | `ParamChanged` | `name`, `old`, `new` |
+| `ParamDefined` | `name`, `default` |
 | `ProviderEjected` | `feed`, `provider` |
 | `ProviderJailed` | `feed`, `provider`, `jailings` |
 | `ProviderRegistered` | `feed`, `provider`, `stake` |
@@ -1382,6 +1417,8 @@ Every `chain.Emit` in the permanent realms and their implementations, with attri
 
 | event | attributes |
 |---|---|
+| `AuthorityCancelled` | `realm`, `spec` |
+| `AuthorityProposed` | `realm`, `spec`, `readyAt` |
 | `AuthorityTransferred` | `realm`, `authority` |
 | `DisputeBallotOpened` | `dispute`, `ballot`, `round` |
 | `DisputeBallotResolved` | `ballot`, `dispute`, `outcome`, `tier` |
@@ -1391,6 +1428,7 @@ Every `chain.Emit` in the permanent realms and their implementations, with attri
 | `MemberUnstakeRequested` | `member`, `amount`, `readyAt` |
 | `MemberVesting` | `member`, `until`, `floor` |
 | `ParamChanged` | `name`, `old`, `new` |
+| `ParamDefined` | `name`, `default` |
 | `PenaltyCapped` | `member`, `forgiven` |
 | `ProposalCreated` | `id`, `kind`, `proposer` |
 | `ProposalStatus` | `id`, `status` |
@@ -1403,6 +1441,8 @@ Every `chain.Emit` in the permanent realms and their implementations, with attri
 
 | event | attributes |
 |---|---|
+| `AuthorityCancelled` | `realm`, `spec` |
+| `AuthorityProposed` | `realm`, `spec`, `readyAt` |
 | `AuthorityTransferred` | `realm`, `authority` |
 | `FloatRedeemed` | `amount` |
 | `KourtDissent` | `dispute`, `claim` |
@@ -1428,6 +1468,7 @@ Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 5
 | `retentionAfterDeprecate` | 90 d (7776000 s) | 30 d (2592000 s) | 730 d (63072000 s) | 5000 | seconds after deprecation before a feed may be pruned |
 | `deadFeedRounds` | 168 | 24 | 10,000 | 5000 | consecutive empty rounds after which a feed is deprecated on prune |
 | `renderDelay` | 600 | 0 | 1 d (86400 s) | 5000 | seconds a final value must age before free views show it |
+| `maxIncentivePay` | 10,000,000 | 0 | 1,000 GNOT/PYTH (1000000000) | 5000 | largest fee-pool payment a release may make per call (tips, bounties) |
 | `trustedOneOffCap` | 50,000 GNOT/PYTH (50000000000) | 0 | 10,000,000 GNOT/PYTH (10000000000000) | 5000 | largest declared value at stake a trusted requester may self-activate |
 | `missSlashBps` | 50 | 0 | 500 | 5000 | slash per missed round on a funded feed |
 | `missSlashCapPerEpochBps` | 500 | 0 | 10,000 | 5000 | largest total miss slash per provider per providerEpoch |

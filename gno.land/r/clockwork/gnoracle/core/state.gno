@@ -253,6 +253,7 @@ var (
 	sponsors  = bptree.NewBPTree32() // feedKey+addr -> *Sponsorship
 	sponsored = bptree.NewBPTree32() // feedKey+consumer -> *Sponsorship (who covers a consumer's reads)
 	slotlog   = bptree.NewBPTree32() // feedKey+slot+fromRound -> address
+	notes     = bptree.NewBPTree32() // kind+id+key -> string: release-defined data (plan §3.2)
 	disputes  = bptree.NewBPTree32() // disputeKey -> *DisputeRecord
 	trusted   = bptree.NewBPTree32() // pkgPath -> int64 cap
 
@@ -366,6 +367,17 @@ func SlotHolderAt(feed uint64, slot int64, r uint64) address {
 	return holder
 }
 
+// Note returns release-defined data attached to an object, or "".
+func Note(kind, id, key string) string {
+	v := notes.Get(noteKey(kind, id, key))
+	if v == nil {
+		return ""
+	}
+	return v.(string)
+}
+
+func noteKey(kind, id, key string) string { return kind + "\x00" + id + "\x00" + key }
+
 // FeedCount is the number of feeds ever created.
 func FeedCount() uint64 { return uint64(feedSeq) }
 
@@ -424,8 +436,8 @@ func assertStateAccess(_ int, rlm realm) {
 	if !rlm.IsCurrent() {
 		panic("core: realm value is not the caller's live cur")
 	}
-	if caller := rlm.PkgPath(); caller != selfPath && !proxy.IsExtension(caller) {
-		panic("core: state is reachable only through " + selfPath + " or a registered extension, not from " + caller)
+	if caller := rlm.PkgPath(); caller != selfPath {
+		panic("core: state is reachable only through " + selfPath + ", not from " + caller)
 	}
 }
 
@@ -443,6 +455,28 @@ func (r *StateRef) inflow(amount int64) {
 	if HeldTotal()+amount > Balance() {
 		panic("core: the coins for this operation were not received")
 	}
+}
+
+// SetNote attaches release-defined data to an object (kind and id are the
+// release's naming, e.g. "feed", "12"); an empty value removes the entry.
+// Releases use it for fields the permanent structs do not have.
+func (r *StateRef) SetNote(kind, id, key, value string) {
+	r.check()
+	if kind == "" || key == "" || len(kind) > 32 || len(id) > 64 || len(key) > 64 || len(value) > 4096 {
+		panic("core: note kind and key must be 1 to 32 and 64 bytes, id at most 64, value at most 4096")
+	}
+	k := noteKey(kind, id, key)
+	if value == "" {
+		notes.Remove(k)
+		return
+	}
+	notes.Set(k, value)
+}
+
+// ClearNotes removes every note of one object.
+func (r *StateRef) ClearNotes(kind, id string) {
+	r.check()
+	removeByPrefix(notes, kind+"\x00"+id+"\x00")
 }
 
 // Emit lets the live implementation emit an event under this realm's path.

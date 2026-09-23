@@ -1,6 +1,7 @@
-// Package impl is the first Kourt mirror release. It binds to kourtdev, the
-// local stand-in; the release for a live network changes the import below to
-// the deployed Kourt realm and nothing else.
+// Package impl is the development release of the Kourt mirror. It binds to
+// kourtdev, the local stand-in, so the mirror can be exercised on a chain
+// without Kourt; impl/kourtv3 is the release for a live network, bound to the
+// deployed Kourt v3 realm and modelling its clocks.
 package impl
 
 import (
@@ -14,7 +15,7 @@ import (
 	kv "gno.land/r/clockwork/gnoracle/kourtdev"
 )
 
-// Kourt's own timings (kourt v3 court.gno, clock.gno).
+// The stand-in's timings (a flat 3 h answer wait and the 72 h settle).
 const (
 	answerWindow = int64(3 * 3600)
 	settleDelay  = int64(72 * 3600)
@@ -273,4 +274,10 @@ func jsonRecord(rec *kourt.Record) *jsonw.Object {
 	return jsonw.New().Int("now", now()).Uint("dispute", rec.Dispute).Bool("exists", true).Str("binding", rec.Binding).Str("state", rec.State).Uint("claim", rec.ClaimID).
 		Str("title", rec.Title).Int("openedAt", rec.OpenedAt).Int("stakedAt", rec.StakedAt).Int("answeredAt", rec.AnsweredAt).
 		Int("settledAt", rec.SettledAt).Int("verdict", int64(rec.Verdict)).Str("route", rec.Route).Int("stake", rec.Stake).Int("steps", rec.Steps)
+}
+
+// Invoke: this release defines no operations beyond the mirror API.
+func (*implV1) Invoke(_ int, rlm realm, caller address, method, args string) string {
+	kourt.Store(0, rlm)
+	panic("kourt: unknown method " + method)
 }

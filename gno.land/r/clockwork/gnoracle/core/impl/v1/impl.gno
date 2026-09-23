@@ -51,3 +51,9 @@ func schedule(f *core.Feed) rounds.Schedule {
 func isServing(f *core.Feed) bool {
 	return f.Status == core.FeedActive || f.Status == core.FeedUnfunded
 }
+
+// Invoke: this release defines no operations beyond the core API.
+func (*implV1) Invoke(_ int, rlm realm, caller address, userCall bool, sent int64, method, args string) string {
+	core.Store(0, rlm)
+	panic("gnoracle: unknown method " + method)
+}

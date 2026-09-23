@@ -175,7 +175,9 @@ The repo's `gnomod.toml` files say `gno.land/r/kourt/kourtv3`; that namespace is
 not registered on mainnet, so the address-namespaced paths above are the live
 ones. Any integration must take the Kourt realm path and court slug as DAO
 parameters, not constants, and the adapter must target the API subset common to
-v2 and v3.
+v2 and v3. (Superseded by the plan, §7.4: a Gno import is compile-time, so each
+mirror release binds one Kourt realm and court; `kourt/impl/kourtv3` binds the
+v3 realm above and a release for another generation is a new directory.)
 
 ### 2.3 Mechanics that matter for us (kourtv3 source)
 

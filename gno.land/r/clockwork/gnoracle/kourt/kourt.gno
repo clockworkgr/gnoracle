@@ -5,10 +5,12 @@
 //
 // A Gno import is compile-time, so the realm that talks to Kourt must name
 // one Kourt deployment. That realm is the implementation behind this one's
-// proxy: impl/v1 binds to the local stand-in (kourtdev), a later release
-// binds to the deployed Kourt. This permanent realm holds the mirror records
-// and the identity that owns the court-coin float, so a release change
-// moves neither.
+// proxy: impl/kourtv3 binds the deployed Kourt v3 realm
+// (gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3) and is the
+// production release; impl/v1 binds the local stand-in (kourtdev) for
+// development chains. This permanent realm holds the mirror records and the
+// identity that owns the court-coin float, so a release change moves
+// neither.
 package kourt
 
 import (
@@ -16,7 +18,9 @@ import (
 	"chain/banker"
 	"strconv"
 	"strings"
+	"time"
 
+	"gno.land/p/clockwork/gnoracle/authspec/v0"
 	"gno.land/p/clockwork/upgradeable/v0"
 	"gno.land/p/nt/bptree/v0"
 )
@@ -72,6 +76,8 @@ type Mirror interface {
 	// Redeem converts amount of court coin back to GNOT where the bound
 	// Kourt allows it (two-way courts) and sends it to the treasury.
 	Redeem(_ int, rlm realm, amount int64) int64
+	// Invoke runs an operation a release defines beyond this interface.
+	Invoke(_ int, rlm realm, caller address, method, args string) string
 	Render(_ int, rlm realm, path string) string
 }
 
@@ -79,6 +85,7 @@ var (
 	proxy    *upgradeable.Proxy
 	selfPath string
 	records  = bptree.NewBPTree32() // disputeKey -> *Record
+	notes    = bptree.NewBPTree32() // kind+id+key -> string: release-defined data
 	count    uint64
 )
 
@@ -146,8 +153,8 @@ func assertStateAccess(_ int, rlm realm) {
 	if !rlm.IsCurrent() {
 		panic("kourt: realm value is not the caller's live cur")
 	}
-	if caller := rlm.PkgPath(); caller != selfPath && !proxy.IsExtension(caller) {
-		panic("kourt: state is reachable only through " + selfPath + " or a registered extension, not from " + caller)
+	if caller := rlm.PkgPath(); caller != selfPath {
+		panic("kourt: state is reachable only through " + selfPath + ", not from " + caller)
 	}
 }
 
@@ -194,7 +201,7 @@ func (r *StateRef) Set(disputeID uint64, state string, claimID uint64, at int64,
 		rec.Stake = stake
 	case StateAnswered:
 		rec.AnsweredAt = at
-	case StateSettled, StateConfirmed, StateDissent:
+	case StateSettled, StateConfirmed, StateDissent, StateAbandoned:
 		rec.SettledAt = at
 		rec.Verdict = verdict
 		rec.Route = route
@@ -205,9 +212,10 @@ func (r *StateRef) Set(disputeID uint64, state string, claimID uint64, at int64,
 	}
 }
 
-// Abandon closes a record the current release cannot advance: a claim that
-// died on Kourt, or a record filed under a previous binding. Authority only;
-// the court coin staked on it stays where Kourt left it.
+// Abandon closes a record the current release cannot advance, typically one
+// filed under a previous binding (a release closes the claims that die on
+// its own court by itself). Authority only; the court coin staked on it
+// stays where Kourt left it.
 func Abandon(cur realm, disputeID uint64, reason string) {
 	proxy.AssertAuthorized(0, cur)
 	rec := GetRecord(disputeID)
@@ -275,26 +283,111 @@ func Freeze(cur realm) {
 	proxy.Freeze(0, cur)
 }
 
-// TransferAuthorityToRealms hands the authority to governance realm paths,
-// which must include the DAO (a typo would lock the realm for good).
-func TransferAuthorityToRealms(cur realm, csvPaths string) {
+// AuthorityTimelock is the delay between proposing and executing a transfer
+// of this realm's authority.
+const AuthorityTimelock = int64(7 * 24 * 3600)
+
+type pendingAuthority struct {
+	Spec    string
+	ReadyAt int64
+}
+
+var (
+	pendingAuth *pendingAuthority
+	attribution = "[built on Kourt](https://kourt.xyz)"
+)
+
+// ProposeAuthority starts a two-step, timelocked transfer; a realm authority
+// must include the DAO.
+func ProposeAuthority(cur realm, spec string) int64 {
 	proxy.AssertAuthorized(0, cur)
-	parts := strings.Split(csvPaths, ",")
-	paths := make([]string, 0, len(parts))
-	hasDAO := false
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			paths = append(paths, p)
-			if p == DAOPath {
-				hasDAO = true
-			}
-		}
+	if _, err := authspec.Parse(spec); err != nil {
+		panic("kourt: " + err.Error())
 	}
-	if !hasDAO {
-		panic("kourt: the realm authority must include " + DAOPath)
+	if authspec.Kind(spec) != "addr" && !authspec.Grants(spec, DAOPath) {
+		panic("kourt: a realm authority must include " + DAOPath)
 	}
-	proxy.TransferAuthority(0, cur, upgradeable.NewRealmAuthority(paths...))
-	emit("AuthorityTransferred", "realm", "kourt", "authority", strings.Join(paths, ","))
+	readyAt := time.Now().Unix() + AuthorityTimelock
+	pendingAuth = &pendingAuthority{Spec: spec, ReadyAt: readyAt}
+	emit("AuthorityProposed", "realm", "kourt", "spec", spec, "readyAt", strconv.FormatInt(readyAt, 10))
+	return readyAt
+}
+
+// ExecuteAuthority applies the pending transfer after its delay; the current
+// authority executes it.
+func ExecuteAuthority(cur realm) {
+	if pendingAuth == nil {
+		panic("kourt: no authority transfer is pending")
+	}
+	if time.Now().Unix() < pendingAuth.ReadyAt {
+		panic("kourt: the authority transfer is timelocked until " + strconv.FormatInt(pendingAuth.ReadyAt, 10))
+	}
+	auth, err := authspec.Parse(pendingAuth.Spec)
+	if err != nil {
+		panic("kourt: " + err.Error())
+	}
+	spec := pendingAuth.Spec
+	pendingAuth = nil
+	proxy.TransferAuthority(0, cur, auth)
+	emit("AuthorityTransferred", "realm", "kourt", "authority", spec)
+}
+
+// CancelAuthority drops the pending transfer. Authority only.
+func CancelAuthority(cur realm) {
+	proxy.AssertAuthorized(0, cur)
+	if pendingAuth == nil {
+		panic("kourt: no authority transfer is pending")
+	}
+	spec := pendingAuth.Spec
+	pendingAuth = nil
+	emit("AuthorityCancelled", "realm", "kourt", "spec", spec)
+}
+
+// PendingAuthority reports the proposed transfer, or "" and 0.
+func PendingAuthority() (spec string, readyAt int64) {
+	if pendingAuth == nil {
+		return "", 0
+	}
+	return pendingAuth.Spec, pendingAuth.ReadyAt
+}
+
+// SetAttribution changes the notice shown at the top of every page (the
+// Kourt licence asks for one; its exact form may be adjusted without a
+// release). Authority only.
+func SetAttribution(cur realm, text string) {
+	proxy.AssertAuthorized(0, cur)
+	if len(text) == 0 || len(text) > 512 {
+		panic("kourt: attribution must be 1 to 512 bytes")
+	}
+	attribution = text
+}
+
+// Invoke runs an operation the live release defines beyond this API.
+func Invoke(cur realm, method, args string) string {
+	return live().Invoke(0, cur, cur.Previous().Address(), method, args)
+}
+
+// Note returns release-defined data attached to an object, or "".
+func Note(kind, id, key string) string {
+	v := notes.Get(kind + "\x00" + id + "\x00" + key)
+	if v == nil {
+		return ""
+	}
+	return v.(string)
+}
+
+// SetNote attaches release-defined data to an object; an empty value removes it.
+func (r *StateRef) SetNote(kind, id, key, value string) {
+	r.check()
+	if kind == "" || key == "" || len(kind) > 32 || len(id) > 64 || len(key) > 64 || len(value) > 4096 {
+		panic("kourt: note kind and key must be 1 to 32 and 64 bytes, id at most 64, value at most 4096")
+	}
+	k := kind + "\x00" + id + "\x00" + key
+	if value == "" {
+		notes.Remove(k)
+		return
+	}
+	notes.Set(k, value)
 }
 
 // LivePath is the implementation currently serving.
@@ -329,7 +422,7 @@ func live() Mirror {
 func Render(cur realm, path string) string {
 	// the attribution the Kourt licence asks for lives in the permanent
 	// realm, so no release can drop it
-	head := "[built on Kourt](https://kourt.xyz)\n\n"
+	head := attribution + "\n\n"
 	if strings.HasPrefix(path, "json") {
 		head = "" // machine views stay pure JSON
 	}

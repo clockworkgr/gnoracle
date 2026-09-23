@@ -6,7 +6,7 @@
 #
 #   make build NS=g1lnk...            # inspect build/
 #   make deploy NS=g1lnk... REMOTE=https://rpc.gno.land:443 CHAINID=gnoland-1 KEY=deployer
-#   WITH_KOURTDEV=1 make deploy ...   # also the stand-in Kourt (dev and test chains only)
+#   WITH_KOURTDEV=1 make deploy ...   # also the stand-in Kourt and its release (dev and test chains only)
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=env.sh
@@ -14,6 +14,8 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 
 SRC_NS="clockwork"
 BUILD="$here/build"
+# the Kourt realm the production mirror release is compiled against
+KOURT_V3="${KOURT_V3:-gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3}"
 
 # dependency order: pure packages, then realms
 PKGS=(
@@ -32,16 +34,16 @@ PKGS=(
   r/$SRC_NS/gnoracle/dao/impl/v1
   r/$SRC_NS/gnoracle/dao/exec
   r/$SRC_NS/gnoracle/kourt
-  r/$SRC_NS/gnoracle/kourt/impl/v1
+  r/$SRC_NS/gnoracle/kourt/impl/kourtv3
 )
-# kourt/impl/v1 binds the stand-in court, so it ships only with kourtdev (dev
-# and test chains); production waits for the release bound to the deployed
-# Kourt (kourt/impl/v2, M6). ONLY="path1 path2" restricts a run to some
-# packages (relative to gno.land/, source namespace), e.g. a new release.
+# kourt/impl/kourtv3 is the production mirror release: it imports the
+# deployed Kourt v3 realm (gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3),
+# which must exist on the target chain. kourt/impl/v1 binds the stand-in
+# court and ships only together with kourtdev under WITH_KOURTDEV=1 (dev and
+# test chains). ONLY="path1 path2" restricts a run to some packages
+# (relative to gno.land/, source namespace), e.g. a new release.
 if [ "${WITH_KOURTDEV:-0}" = 1 ]; then
-  PKGS=("${PKGS[@]:0:14}" r/$SRC_NS/gnoracle/kourtdev "${PKGS[@]:14}")
-else
-  PKGS=("${PKGS[@]:0:15}")
+  PKGS+=(r/$SRC_NS/gnoracle/kourtdev r/$SRC_NS/gnoracle/kourt/impl/v1)
 fi
 if [ -n "${ONLY:-}" ]; then
   read -r -a PKGS <<< "$ONLY"
@@ -88,6 +90,10 @@ deploy() {
     dir="$BUILD/$path"
     if pkg_exists "$path"; then
       echo "live: $path"
+      continue
+    fi
+    if [ "$p" = "r/$SRC_NS/gnoracle/kourt/impl/kourtv3" ] && ! pkg_exists "$KOURT_V3"; then
+      echo "skip: $path imports $KOURT_V3, which $REMOTE does not have (deploy with WITH_KOURTDEV=1 on chains without Kourt v3)"
       continue
     fi
     echo "addpkg: $path"

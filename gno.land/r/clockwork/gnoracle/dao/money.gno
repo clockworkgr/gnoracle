@@ -157,12 +157,24 @@ func (r *StateRef) CoreFreeze() {
 	core.Freeze(cross(rlm))
 }
 
-// CoreTransferAuthority executes an authority-transfer proposal on the core
-// realm: to this DAO alone (csv empty) or to an address plus realm paths.
-func (r *StateRef) CoreTransferAuthority(csvPaths string) {
+// CoreProposeAuthority, CoreExecuteAuthority and CoreCancelAuthority drive
+// the core realm's two-step authority transfer from proposals.
+func (r *StateRef) CoreProposeAuthority(spec string) {
 	r.check()
 	rlm := r.rlm
-	core.TransferAuthorityToRealms(cross(rlm), csvPaths)
+	core.ProposeAuthority(cross(rlm), spec)
+}
+
+func (r *StateRef) CoreExecuteAuthority() {
+	r.check()
+	rlm := r.rlm
+	core.ExecuteAuthority(cross(rlm))
+}
+
+func (r *StateRef) CoreCancelAuthority() {
+	r.check()
+	rlm := r.rlm
+	core.CancelAuthority(cross(rlm))
 }
 
 // ---- the Kourt mirror realm's releases and authority (proposals)
@@ -188,12 +200,24 @@ func (r *StateRef) KourtFreeze() {
 	kourt.Freeze(cross(rlm))
 }
 
-// KourtTransferAuthority executes an authority-transfer proposal on the
-// mirror realm.
-func (r *StateRef) KourtTransferAuthority(csvPaths string) {
+// KourtProposeAuthority, KourtExecuteAuthority and KourtCancelAuthority drive
+// the mirror realm's two-step authority transfer from proposals.
+func (r *StateRef) KourtProposeAuthority(spec string) {
 	r.check()
 	rlm := r.rlm
-	kourt.TransferAuthorityToRealms(cross(rlm), csvPaths)
+	kourt.ProposeAuthority(cross(rlm), spec)
+}
+
+func (r *StateRef) KourtExecuteAuthority() {
+	r.check()
+	rlm := r.rlm
+	kourt.ExecuteAuthority(cross(rlm))
+}
+
+func (r *StateRef) KourtCancelAuthority() {
+	r.check()
+	rlm := r.rlm
+	kourt.CancelAuthority(cross(rlm))
 }
 
 // KourtAbandon closes a mirror record the current release cannot advance.

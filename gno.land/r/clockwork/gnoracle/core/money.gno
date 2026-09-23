@@ -80,6 +80,22 @@ func (r *StateRef) send(to address, amount int64) {
 	b.SendCoins(r.rlm.Address(), to, chain.NewCoins(chain.NewCoin(StakeDenom, amount)))
 }
 
+// FeesPay pays an incentive (a tip, a bounty) from the pending fee pool,
+// bounded per call by maxIncentivePay, so releases can fund new incentives
+// without a new money primitive.
+func (r *StateRef) FeesPay(to address, amount int64) {
+	r.check()
+	if amount <= 0 || amount > Param("maxIncentivePay") {
+		panic("core: incentive must be positive and at most maxIncentivePay")
+	}
+	if amount > held.FeesPending {
+		panic("core: the fee pool cannot cover this incentive")
+	}
+	held.FeesPending -= amount
+	r.send(to, amount)
+	emit("IncentivePaid", "to", string(to), "amount", strconv.FormatInt(amount, 10))
+}
+
 // ForwardFees sends the pending staker and treasury shares to the DAO realm
 // once one is configured. Anyone may call it; nothing moves without a DAO.
 func ForwardFees(cur realm) int64 {

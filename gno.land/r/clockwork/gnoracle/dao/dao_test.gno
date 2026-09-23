@@ -111,7 +111,11 @@ func install(cur realm) {
 	nosend()
 	core.Accept(cross(cur), coreImplPath)
 	dao.Accept(cross(cur), daoImplPath)
-	core.TransferAuthorityShared(cross(cur), admin, daoPath)
+	core.ProposeAuthority(cross(cur), "anyof:"+string(admin)+"|"+daoPath)
+	skip(core.AuthorityTimelock + 5)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.ExecuteAuthority(cross(cur))
 	token.TransferMinter(cross(cur), daoAddr)
 	// genesis distribution: three members and a treasury
 	token.Transfer(cross(cur), alice, 10_000_000*pyth)
@@ -429,6 +433,56 @@ func TestTreasuryUgnotAndDepositsStayAccounted(cur realm, t *testing.T) {
 	dao.Execute(cross(cur), tp)
 	uassert.Equal(t, before-10*gnot, dao.TreasuryUgnot())
 	uassert.Equal(t, int64(0), dao.SyncFees(cross(cur))) // no phantom income after the payout
+	health(t)
+}
+
+// TestAuthorityHandoverIsTwoStep drives the DAO's own authority through the
+// proposal kinds: a transfer is proposed, waits its timelock, and executes
+// in a second proposal; the exec trampoline must stay in every spec.
+func TestAuthorityHandoverIsTwoStep(cur realm, t *testing.T) {
+	install(cur)
+	epoch()
+	exec := "gno.land/r/clockwork/gnoracle/dao/exec"
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	uassert.AbortsContains(t, cur, "must include", func() { dao.Propose(cross(cur), "authority-transfer", "dao addr:"+string(admin), "drop exec?") })
+	uassert.AbortsContains(t, cur, "authspec", func() { dao.Propose(cross(cur), "authority-transfer", "dao nonsense", "bad spec") })
+	p1 := dao.Propose(cross(cur), "authority-transfer", "dao realms:"+exec, "Hand the DAO to itself")
+	dao.Vote(cross(cur), p1, "YES")
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	dao.Vote(cross(cur), p1, "YES")
+	skip(14*day + 7*day + 5)
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	dao.Execute(cross(cur), p1)
+	spec, readyAt := dao.PendingAuthority()
+	uassert.Equal(t, "realms:"+exec, spec)
+	uassert.Equal(t, dao.Now()+dao.AuthorityTimelock, readyAt)
+	// the realm's own timelock holds even for the guardian, who is still an authority
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	uassert.AbortsContains(t, cur, "timelocked", func() { dao.ExecuteAuthority(cross(cur)) })
+	// once the timelock passed, the DAO executes it through a second proposal
+	skip(dao.AuthorityTimelock + 5)
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	p2 := dao.Propose(cross(cur), "authority-execute", "dao", "Execute the handover")
+	dao.Vote(cross(cur), p2, "YES")
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	dao.Vote(cross(cur), p2, "YES")
+	skip(3*day + 5)
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	dao.Execute(cross(cur), p2)
+	uassert.True(t, strings.HasPrefix(dao.Authority(), "realms:"))
+	spec, _ = dao.PendingAuthority()
+	uassert.Equal(t, "", spec)
+	// the guardian key is a stranger to the DAO's proxy now
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	uassert.AbortsContains(t, cur, "not the authority", func() { dao.ProposeAuthority(cross(cur), "anyof:"+string(admin)+"|"+exec) })
 	health(t)
 }
 

@@ -66,13 +66,26 @@ func TestUpgradeRollbackKeepsState(cur realm, t *testing.T) {
 	nosend()
 	uassert.AbortsContains(t, cur, "not the authority", func() { core.Rollback(cross(cur)) })
 	uassert.AbortsContains(t, cur, "not the authority", func() { core.Freeze(cross(cur)) })
-	uassert.AbortsContains(t, cur, "not the authority", func() { core.TransferAuthority(cross(cur), admin) }) // admin is a valid address; the caller is not the authority
+	uassert.AbortsContains(t, cur, "not the authority", func() { core.ProposeAuthority(cross(cur), "addr:"+string(admin)) })
 
 	// re-accept v1b and hand the authority to a governance realm path
 	testing.SetRealm(testing.NewUserRealm(admin))
 	nosend()
 	core.Accept(cross(cur), implPathB)
-	core.TransferAuthorityToRealms(cross(cur), "gno.land/r/clockwork/gnoracle/dao")
+	// authority moves in two timelocked steps, and a realm list must include the DAO
+	uassert.AbortsContains(t, cur, "must include", func() { core.ProposeAuthority(cross(cur), "realms:gno.land/r/clockwork/gnoracle/dao/exec") })
+	core.ProposeAuthority(cross(cur), "realms:gno.land/r/clockwork/gnoracle/dao")
+	spec, readyAt := core.PendingAuthority()
+	uassert.Equal(t, "realms:gno.land/r/clockwork/gnoracle/dao", spec)
+	uassert.True(t, readyAt > core.Now())
+	uassert.AbortsContains(t, cur, "timelocked", func() { core.ExecuteAuthority(cross(cur)) })
+	core.CancelAuthority(cross(cur))
+	uassert.AbortsContains(t, cur, "no authority transfer", func() { core.ExecuteAuthority(cross(cur)) })
+	core.ProposeAuthority(cross(cur), "realms:gno.land/r/clockwork/gnoracle/dao")
+	skip(core.AuthorityTimelock + 5)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.ExecuteAuthority(cross(cur))
 	uassert.True(t, strings.Contains(core.Authority(), "gno.land/r/clockwork/gnoracle/dao"))
 	// the old admin key is now a stranger
 	testing.SetRealm(testing.NewUserRealm(admin))
@@ -83,5 +96,56 @@ func TestUpgradeRollbackKeepsState(cur realm, t *testing.T) {
 	core.Rollback(cross(cur))
 	uassert.Equal(t, implPath, core.LivePath())
 	// and hand it back so later tests keep working
-	core.TransferAuthority(cross(cur), admin)
+	core.ProposeAuthority(cross(cur), "addr:"+string(admin))
+	skip(core.AuthorityTimelock + 5)
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/clockwork/gnoracle/dao"))
+	core.ExecuteAuthority(cross(cur))
+}
+
+// TestReleaseHooks exercises what a release can add without a permanent
+// change: operations through Invoke, per-object notes, governed parameters
+// and bounded incentives from the fee pool.
+func TestReleaseHooks(cur realm, t *testing.T) {
+	install(cur)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.Accept(cross(cur), implPathB)
+	uassert.Equal(t, implPathB, core.LivePath())
+
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	uassert.Equal(t, "hello", core.Invoke(cross(cur), "echo", "hello"))
+	uassert.AbortsContains(t, cur, "unknown method", func() { core.Invoke(cross(cur), "nope", "") })
+
+	// release data beside the permanent structs
+	uassert.Equal(t, "", core.Note("v2", "7", "source"))
+	uassert.Equal(t, "kraken spot", core.Invoke(cross(cur), "note", "7 source kraken spot"))
+	uassert.Equal(t, "kraken spot", core.Note("v2", "7", "source"))
+	core.Invoke(cross(cur), "note", "7 source ")
+	uassert.Equal(t, "", core.Note("v2", "7", "source")) // empty value removes
+
+	// a governed parameter added by a release, then tuned by the authority
+	uassert.Equal(t, "40", core.Invoke(cross(cur), "define", "v2Knob 40"))
+	uassert.Equal(t, int64(40), core.Param("v2Knob"))
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.SetParam(cross(cur), "v2Knob", 60)
+	uassert.Equal(t, int64(60), core.Param("v2Knob"))
+
+	// a bounded incentive from the fee pool
+	_, _, _, _, _, _, fees, _ := core.Held()
+	uassert.True(t, fees > 0)
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	uassert.AbortsContains(t, cur, "maxIncentivePay", func() { core.Invoke(cross(cur), "tip", "999999999999") })
+	uassert.Equal(t, "paid", core.Invoke(cross(cur), "tip", "1000"))
+	_, _, _, _, _, _, feesAfter, _ := core.Held()
+	uassert.Equal(t, fees-1000, feesAfter)
+	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
+
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.Rollback(cross(cur))
+	uassert.Equal(t, implPath, core.LivePath())
+	uassert.Equal(t, int64(60), core.Param("v2Knob")) // definitions and data outlive the release
 }

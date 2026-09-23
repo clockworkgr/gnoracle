@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"gno.land/p/clockwork/gnoracle/authspec/v0"
 	"gno.land/p/clockwork/upgradeable/v0"
 )
 
@@ -52,6 +53,10 @@ func init(cur realm) {
 // it in as `sent`; the implementation decides what it buys and the store
 // records where it went.
 type Core interface {
+	// Invoke runs an operation a release defines beyond this interface, so
+	// new user-facing operations ship as release code (args is release-defined
+	// text, usually JSON).
+	Invoke(_ int, rlm realm, caller address, userCall bool, sent int64, method, args string) string
 	// feeds
 	ProposeFeed(_ int, rlm realm, proposer address, callerPkg string, specJSON string, sent int64) uint64
 	ActivateFeed(_ int, rlm realm, feedID uint64)
@@ -342,65 +347,85 @@ func Freeze(cur realm) {
 	emit("Frozen")
 }
 
-// AddExtension permits another realm to act as this one. Authority only.
-func AddExtension(cur realm, pkgPath string) { proxy.AddExtension(0, cur, pkgPath) }
+// AuthorityTimelock is the delay between proposing and executing an
+// authority transfer. It is a constant, not a parameter, so whoever holds the
+// authority cannot shorten it before a transfer.
+const AuthorityTimelock = int64(7 * 24 * 3600)
 
-// DropExtension revokes one. Authority only.
-func DropExtension(cur realm, pkgPath string) { proxy.DropExtension(0, cur, pkgPath) }
-
-// TransferAuthority hands the authority to another address.
-func TransferAuthority(cur realm, newOwner address) {
-	proxy.TransferAuthority(0, cur, upgradeable.NewAddrAuthority(newOwner))
-	emit("AuthorityTransferred", "authority", string(newOwner))
+type pendingAuthority struct {
+	Spec    string
+	ReadyAt int64
 }
 
-// TransferAuthorityToRealms hands the authority to one or more governance
-// realms by path (comma-separated). The DAO handover of the plan (§8.6).
-func TransferAuthorityToRealms(cur realm, csvPaths string) {
-	parts := strings.Split(csvPaths, ",")
-	paths := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			paths = append(paths, p)
-		}
-	}
-	// a realm-only authority must include the DAO: a typo here would leave
-	// no principal able to govern the realm ever again
+var pendingAuth *pendingAuthority
+
+// ProposeAuthority starts a two-step, timelocked transfer of this realm's
+// authority to the authority spec describes (authspec: `addr:<address>`,
+// `realms:<paths>`, `anyof:<address>|<paths>`). Any spec that names realms
+// must include the DAO, so a typo cannot leave the realm ungoverned. The
+// pending transfer is public and cancellable until it is executed.
+func ProposeAuthority(cur realm, spec string) int64 {
 	proxy.AssertAuthorized(0, cur)
-	if !containsPath(paths, DAOPath) {
-		panic("core: the realm authority must include " + DAOPath)
+	if _, err := authspec.Parse(spec); err != nil {
+		panic("core: " + err.Error())
 	}
-	proxy.TransferAuthority(0, cur, upgradeable.NewRealmAuthority(paths...))
-	emit("AuthorityTransferred", "authority", strings.Join(paths, ","))
+	if authspec.Kind(spec) != "addr" && !authspec.Grants(spec, DAOPath) {
+		panic("core: a realm authority must include " + DAOPath)
+	}
+	readyAt := Now() + AuthorityTimelock
+	pendingAuth = &pendingAuthority{Spec: spec, ReadyAt: readyAt}
+	emit("AuthorityProposed", "spec", spec, "readyAt", strconv.FormatInt(readyAt, 10))
+	return readyAt
 }
 
-func containsPath(paths []string, want string) bool {
-	for _, p := range paths {
-		if p == want {
-			return true
-		}
+// ExecuteAuthority applies the pending transfer once its delay has passed.
+// The current authority executes it (the proxy admits nobody else), which
+// for the DAO means a second proposal.
+func ExecuteAuthority(cur realm) {
+	if pendingAuth == nil {
+		panic("core: no authority transfer is pending")
 	}
-	return false
+	if Now() < pendingAuth.ReadyAt {
+		panic("core: the authority transfer is timelocked until " + strconv.FormatInt(pendingAuth.ReadyAt, 10))
+	}
+	auth, err := authspec.Parse(pendingAuth.Spec)
+	if err != nil {
+		panic("core: " + err.Error())
+	}
+	spec := pendingAuth.Spec
+	pendingAuth = nil
+	proxy.TransferAuthority(0, cur, auth)
+	emit("AuthorityTransferred", "authority", spec)
 }
 
-// TransferAuthorityShared keeps an address and adds governance realms, for the
-// bootstrap overlap where the guardian and the DAO both may act.
-func TransferAuthorityShared(cur realm, owner address, csvPaths string) {
-	parts := strings.Split(csvPaths, ",")
-	paths := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			paths = append(paths, p)
-		}
-	}
+// CancelAuthority drops the pending transfer. Authority only.
+func CancelAuthority(cur realm) {
 	proxy.AssertAuthorized(0, cur)
-	if !containsPath(paths, DAOPath) {
-		panic("core: the shared authority must include " + DAOPath)
+	if pendingAuth == nil {
+		panic("core: no authority transfer is pending")
 	}
-	proxy.TransferAuthority(0, cur, upgradeable.NewAnyOf(upgradeable.NewAddrAuthority(owner), upgradeable.NewRealmAuthority(paths...)))
-	emit("AuthorityTransferred", "authority", string(owner)+"|"+strings.Join(paths, ","))
+	spec := pendingAuth.Spec
+	pendingAuth = nil
+	emit("AuthorityCancelled", "spec", spec)
+}
+
+// PendingAuthority reports the proposed transfer, or "" and 0.
+func PendingAuthority() (spec string, readyAt int64) {
+	if pendingAuth == nil {
+		return "", 0
+	}
+	return pendingAuth.Spec, pendingAuth.ReadyAt
+}
+
+// Invoke runs an operation the live release defines beyond this API (plan
+// §3.2): the release decides what method and args mean and what it costs.
+func Invoke(cur realm, method, args string) string {
+	prev := cur.Previous()
+	sent := int64(0)
+	if prev.IsUserCall() {
+		sent = unsafe.OriginSend().AmountOf(StakeDenom)
+	}
+	return live().Invoke(0, cur, prev.Address(), prev.IsUserCall(), sent, method, args)
 }
 
 // LiveImpl returns the live implementation as an untyped value, the hook
@@ -440,9 +465,6 @@ func Frozen() bool { return proxy.Frozen() }
 // Authority describes who may upgrade and govern.
 func Authority() string { return proxy.Authority().String() }
 
-// Extensions lists realms allowed to act as this one.
-func Extensions() []string { return proxy.Extensions() }
-
 // SelfPath is this realm's package path.
 func SelfPath() string { return selfPath }
 
@@ -468,12 +490,8 @@ func Render(cur realm, path string) string {
 		if proxy.Frozen() {
 			b.WriteString("**Frozen.**\n\n")
 		}
-		if exts := proxy.Extensions(); len(exts) > 0 {
-			b.WriteString("Extensions:\n\n")
-			for _, e := range exts {
-				b.WriteString("- `" + e + "`\n")
-			}
-			b.WriteString("\n")
+		if pendingAuth != nil {
+			b.WriteString("Pending authority transfer: `" + pendingAuth.Spec + "` executable from " + strconv.FormatInt(pendingAuth.ReadyAt, 10) + "\n\n")
 		}
 		if pending := proxy.Pending(); len(pending) > 0 {
 			b.WriteString("Awaiting acceptance:\n\n")

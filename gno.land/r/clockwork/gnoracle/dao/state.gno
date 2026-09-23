@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"gno.land/p/clockwork/gnoracle/params/v0"
+
 	"gno.land/p/clockwork/gnoracle/checkpoint/v0"
 	"gno.land/p/clockwork/gnoracle/ledger/v0"
 	"gno.land/p/nt/bptree/v0"
@@ -108,6 +110,7 @@ type Ballot struct {
 
 var (
 	members   = bptree.NewBPTree32() // addr -> *Member
+	notes     = bptree.NewBPTree32() // kind+id+key -> string: release-defined data
 	proposals = bptree.NewBPTree32() // idKey -> *Proposal
 	votes     = bptree.NewBPTree32() // idKey+addr -> choice string
 	ballots   = bptree.NewBPTree32() // seqKey -> *Ballot (resolved ballots keep their index for settle cursors)
@@ -281,8 +284,8 @@ func assertStateAccess(_ int, rlm realm) {
 	if !rlm.IsCurrent() {
 		panic("dao: realm value is not the caller's live cur")
 	}
-	if caller := rlm.PkgPath(); caller != selfPath && !proxy.IsExtension(caller) {
-		panic("dao: state is reachable only through " + selfPath + " or a registered extension, not from " + caller)
+	if caller := rlm.PkgPath(); caller != selfPath {
+		panic("dao: state is reachable only through " + selfPath + ", not from " + caller)
 	}
 }
 
@@ -739,3 +742,67 @@ func (r *StateRef) BallotFund(seq uint64, amount int64) {
 // ---- helpers
 
 func emit(typ string, attrs ...string) { chain.Emit(typ, attrs...) }
+
+// Note returns release-defined data attached to an object, or "".
+func Note(kind, id, key string) string {
+	v := notes.Get(noteKey(kind, id, key))
+	if v == nil {
+		return ""
+	}
+	return v.(string)
+}
+
+func noteKey(kind, id, key string) string { return kind + "\x00" + id + "\x00" + key }
+
+// SetNote attaches release-defined data to an object; an empty value removes it.
+func (r *StateRef) SetNote(kind, id, key, value string) {
+	r.check()
+	if kind == "" || key == "" || len(kind) > 32 || len(id) > 64 || len(key) > 64 || len(value) > 4096 {
+		panic("dao: note kind and key must be 1 to 32 and 64 bytes, id at most 64, value at most 4096")
+	}
+	k := noteKey(kind, id, key)
+	if value == "" {
+		notes.Remove(k)
+		return
+	}
+	notes.Set(k, value)
+}
+
+// ClearNotes removes every note of one object.
+func (r *StateRef) ClearNotes(kind, id string) {
+	r.check()
+	for {
+		keys := []string{}
+		notes.Iterate(kind+"\x00"+id+"\x00", kind+"\x00"+id+"\x00\xff", func(k string, _ any) bool {
+			keys = append(keys, k)
+			return len(keys) >= 256
+		})
+		for _, k := range keys {
+			notes.Remove(k)
+		}
+		if len(keys) < 256 {
+			return
+		}
+	}
+}
+
+// DefineParam lets a release add a governed integer parameter with bounds;
+// an existing name is left as it is.
+func (r *StateRef) DefineParam(name, doc string, def, lo, hi, changeBps int64) {
+	r.check()
+	if registry.Has(name) {
+		return
+	}
+	registry.Define(params.Def{Name: name, Doc: doc, Default: def, Min: lo, Max: hi, MaxChangeBps: changeBps})
+	emit("ParamDefined", "name", name, "default", strconv.FormatInt(def, 10))
+}
+
+// DefineParamStr lets a release add a governed text parameter.
+func (r *StateRef) DefineParamStr(name, doc, def string) {
+	r.check()
+	if registry.Has(name) {
+		return
+	}
+	registry.DefineString(name, doc, def)
+	emit("ParamDefined", "name", name, "default", def)
+}

@@ -15,9 +15,11 @@
 package dao
 
 import (
+	"chain/runtime/unsafe"
 	"strconv"
 	"strings"
 
+	"gno.land/p/clockwork/gnoracle/authspec/v0"
 	"gno.land/p/clockwork/upgradeable/v0"
 	"gno.land/r/clockwork/gnoracle/core"
 )
@@ -76,6 +78,8 @@ func Hooks() core.BallotHouse { return hooks{} }
 
 // DAO is the behaviour this realm promises to its implementations.
 type DAO interface {
+	// Invoke runs an operation a release defines beyond this interface.
+	Invoke(_ int, rlm realm, caller address, userCall bool, sent int64, method, args string) string
 	// membership
 	Stake(_ int, rlm realm, member address, amount int64)
 	RequestUnstake(_ int, rlm realm, member address, amount int64)
@@ -234,34 +238,81 @@ func Freeze(cur realm) {
 	emit("Frozen", "realm", "dao")
 }
 
-// AddExtension permits another realm to act as this one. Authority only.
-func AddExtension(cur realm, pkgPath string) { proxy.AddExtension(0, cur, pkgPath) }
+// AuthorityTimelock is the delay between proposing and executing a transfer
+// of this realm's authority (a constant, so the authority cannot shorten it).
+const AuthorityTimelock = int64(7 * 24 * 3600)
 
-// DropExtension revokes one. Authority only.
-func DropExtension(cur realm, pkgPath string) { proxy.DropExtension(0, cur, pkgPath) }
-
-// TransferAuthority hands the authority to an address plus the exec realm.
-func TransferAuthority(cur realm, newOwner address) {
-	proxy.TransferAuthority(0, cur, upgradeable.NewAnyOf(
-		upgradeable.NewAddrAuthority(newOwner),
-		upgradeable.NewRealmAuthority(ExecPath),
-	))
-	emit("AuthorityTransferred", "realm", "dao", "authority", string(newOwner)+"|"+ExecPath)
+type pendingAuthority struct {
+	Spec    string
+	ReadyAt int64
 }
 
-// SetVesting records a member's vesting terms: floor stays staked until
-// until (the founders' allocation, plan §9.1). Authority only, before the
-// handover; afterwards the `vesting` proposal kind.
-func SetVesting(cur realm, member address, until, floor int64) {
+var pendingAuth *pendingAuthority
+
+// ProposeAuthority starts a two-step, timelocked transfer of the DAO's own
+// authority. Every spec must grant the exec trampoline, or the DAO could no
+// longer act on itself; the guardian key is dropped with
+// `realms:<exec path>`.
+func ProposeAuthority(cur realm, spec string) int64 {
 	proxy.AssertAuthorized(0, cur)
-	setVesting(member, until, floor)
+	if _, err := authspec.Parse(spec); err != nil {
+		panic("dao: " + err.Error())
+	}
+	if !authspec.Grants(spec, ExecPath) {
+		panic("dao: the authority must include " + ExecPath)
+	}
+	readyAt := Now() + AuthorityTimelock
+	pendingAuth = &pendingAuthority{Spec: spec, ReadyAt: readyAt}
+	emit("AuthorityProposed", "realm", "dao", "spec", spec, "readyAt", strconv.FormatInt(readyAt, 10))
+	return readyAt
 }
 
-// TransferAuthorityToExec leaves only the exec trampoline: from then on only
-// a passed proposal can change this realm's release.
-func TransferAuthorityToExec(cur realm) {
-	proxy.TransferAuthority(0, cur, upgradeable.NewRealmAuthority(ExecPath))
-	emit("AuthorityTransferred", "realm", "dao", "authority", ExecPath)
+// ExecuteAuthority applies the pending transfer after its delay; the current
+// authority executes it.
+func ExecuteAuthority(cur realm) {
+	if pendingAuth == nil {
+		panic("dao: no authority transfer is pending")
+	}
+	if Now() < pendingAuth.ReadyAt {
+		panic("dao: the authority transfer is timelocked until " + strconv.FormatInt(pendingAuth.ReadyAt, 10))
+	}
+	auth, err := authspec.Parse(pendingAuth.Spec)
+	if err != nil {
+		panic("dao: " + err.Error())
+	}
+	spec := pendingAuth.Spec
+	pendingAuth = nil
+	proxy.TransferAuthority(0, cur, auth)
+	emit("AuthorityTransferred", "realm", "dao", "authority", spec)
+}
+
+// CancelAuthority drops the pending transfer. Authority only.
+func CancelAuthority(cur realm) {
+	proxy.AssertAuthorized(0, cur)
+	if pendingAuth == nil {
+		panic("dao: no authority transfer is pending")
+	}
+	spec := pendingAuth.Spec
+	pendingAuth = nil
+	emit("AuthorityCancelled", "realm", "dao", "spec", spec)
+}
+
+// PendingAuthority reports the proposed transfer, or "" and 0.
+func PendingAuthority() (spec string, readyAt int64) {
+	if pendingAuth == nil {
+		return "", 0
+	}
+	return pendingAuth.Spec, pendingAuth.ReadyAt
+}
+
+// Invoke runs an operation the live release defines beyond this API.
+func Invoke(cur realm, method, args string) string {
+	prev := cur.Previous()
+	sent := int64(0)
+	if prev.IsUserCall() {
+		sent = unsafe.OriginSend().AmountOf(FeeDenom)
+	}
+	return live().Invoke(0, cur, prev.Address(), prev.IsUserCall(), sent, method, args)
 }
 
 // LiveImpl returns the live implementation as an untyped value.

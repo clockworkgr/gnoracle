@@ -629,7 +629,7 @@ func TestRejectedRequestRefundsPrepayment(cur realm, t *testing.T) {
 	nosend()
 	core.DeprecateFeed(cross(cur), id2, "spam")
 	_, _, _, _, _, _, feesSpam, _ := core.Held()
-	uassert.Equal(t, feesAfter+5*gnot, feesSpam)        // the deposit is forfeited
+	uassert.Equal(t, feesAfter+5*gnot, feesSpam)          // the deposit is forfeited
 	uassert.Equal(t, heldBefore+5*gnot, core.HeldTotal()) // the prepayment still returned
 	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
 }

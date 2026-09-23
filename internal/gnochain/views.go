@@ -379,8 +379,10 @@ func (r *KourtRecord) Terminal() bool {
 }
 
 // Due reports whether a crank at chain time now can advance the record:
-// the stand-in and Kourt wait 3 h after filing before an answer and 72 h
-// after the answer before an undisputed settlement.
+// Kourt v3 needs three epochs (about 3 h) of stake history before an
+// answer and 72 h after the answer before an undisputed settlement; the
+// stand-in uses the same waits. A crank that is due may still find nothing
+// to do (a priority window, a vote in progress) and returns the same state.
 func (r *KourtRecord) Due(now int64) bool {
 	switch r.State {
 	case "staked":
