@@ -328,8 +328,9 @@ lat_fin = [r["finalisedAt"] - r["opensAt"] for r in run_rounds if r.get("finalis
 if lat_fin:
     w(f"\n- Round finalised after it opened: {min(lat_fin)} to {max(lat_fin)} s against a 60 s window (agents poll every 2 s and wait a 1 to 3 s jitter).\n")
 w("- The fee is the gas asked for, not the gas used. In this run the tools simulated each call and asked for "
-  "(measured gas + 12M finalisation headroom) x 1.25 for a `Submit`; the sizing has since been changed to the larger "
-  "of measured x 1.25 and measured + 12M, which would have made these fees about 30,000 to 44,000 ugnot. A submission "
+  "(measured gas + 12M finalisation headroom) x 1.25 for every `Submit`; the sizing has since been changed so the headroom "
+  "is only added when exactly one other provider is still to submit, and the fee is the larger of measured x 1.25 and "
+  "measured + headroom, which would have made most of these fees about 23,000 ugnot and the finalising ones about 40,000. A submission "
   "that also finalises costs about 13M gas more than a plain one, and which agent pays it depends on who submits last.\n")
 w("- On gnoland-1 the same transactions cost the same gas; only the gas price (0.001 ugnot per gas minimum) "
   "and the block time differ. `docs/SIMULATION.md` turns these numbers into monthly costs per feed cadence.\n")

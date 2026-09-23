@@ -173,11 +173,12 @@ Realm events worth alerting on outside the bot: `ProviderJailed`,
 - Gas is priced at `0.001ugnot` per gas and the whole fee is charged, so the
   tools simulate first (`gas.mode = "estimate"`) and ask for the measured
   gas plus 25%. Measured on v1.2.0: `Submit` about 18M gas (0.023 GNOT at
-  the minimum price), `Submit` that also finalises about 29M, `CatchUp` of
+  the minimum price), `Submit` that also finalises about 32M, `CatchUp` of
   one round about 27M and more per extra round (the tools halve the batch
-  on out-of-gas). The agent adds 12M of headroom to a `Submit` estimate
-  because the other providers' submissions may land between the simulation
-  and inclusion and turn it into the finalising call.
+  on out-of-gas). When exactly one other provider is still to submit, the
+  agent asks for 14M of headroom on top of its `Submit` estimate, because
+  that provider's submission may land between the simulation and inclusion
+  and turn the call into the finalising one.
 - Storage deposits: the first submission of a round locks about 0.18 GNOT
   (1.8 kB at 100 ugnot per byte) from the submitter's account; the chain
   refunds it to whoever later frees the storage (`PruneRounds`), so pruning

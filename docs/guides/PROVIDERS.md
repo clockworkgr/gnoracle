@@ -9,9 +9,10 @@ agent on one feed.
 
 - A gno.land account with the stake plus a gas budget. The stake floor is
   10,000 GNOT (`providerMinStakeFloor`); a feed may ask more (`providerMinStake`
-  in its spec). Gas: about 0.022 GNOT per submission at the chain minimum
-  price, so an hourly feed costs roughly 16 GNOT a month and a five-minute
-  feed about 190 GNOT a month. Check the feed's subscription price and pool
+  in its spec). Gas: about 0.023 GNOT per submission at the chain minimum
+  price (about 0.04 GNOT for the submission that completes a round), so an
+  hourly feed costs roughly 16 to 20 GNOT a month and a five-minute feed
+  about 200 GNOT a month. Check the feed's subscription price and pool
   before registering; `gnoracle feed <id>` shows `pool` and `drip` (what a
   round pays, split among the providers that submitted).
 - Reliable access to the sources in the spec (`gnoracle feed <id>` prints

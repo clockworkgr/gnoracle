@@ -364,7 +364,7 @@ exit 0
 | submit | 15 | 17,765,755 / 18,593,526 / 31,803,975 | 37,207 to 54,755 ugnot |
 
 - Round finalised after it opened: 3 to 6 s against a 60 s window (agents poll every 2 s and wait a 1 to 3 s jitter).
-- The fee is the gas asked for, not the gas used. In this run the tools simulated each call and asked for (measured gas + 12M finalisation headroom) x 1.25 for a `Submit`; the sizing has since been changed to the larger of measured x 1.25 and measured + 12M, which would have made these fees about 30,000 to 44,000 ugnot. A submission that also finalises costs about 13M gas more than a plain one, and which agent pays it depends on who submits last.
+- The fee is the gas asked for, not the gas used. In this run the tools simulated each call and asked for (measured gas + 12M finalisation headroom) x 1.25 for every `Submit`; the sizing has since been changed so the headroom is only added when exactly one other provider is still to submit, and the fee is the larger of measured x 1.25 and measured + headroom, which would have made most of these fees about 23,000 ugnot and the finalising ones about 40,000. A submission that also finalises costs about 13M gas more than a plain one, and which agent pays it depends on who submits last.
 - On gnoland-1 the same transactions cost the same gas; only the gas price (0.001 ugnot per gas minimum) and the block time differ. `docs/SIMULATION.md` turns these numbers into monthly costs per feed cadence.
 
 ## 10. Reproduce it

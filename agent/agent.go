@@ -151,8 +151,9 @@ func u(v uint64) string { return strconv.FormatUint(v, 10) }
 func i(v int64) string  { return strconv.FormatInt(v, 10) }
 
 // submitFinaliseHeadroom is the gas a Submit needs on top of a plain one
-// when it also finalises the round (measured 18.4M vs 28.7M on v1.2.0).
-const submitFinaliseHeadroom = 12_000_000
+// when it also finalises the round (measured 18.5M vs 31.8M on v1.2.0 with
+// three providers).
+const submitFinaliseHeadroom = 14_000_000
 
 // tick is one pass over the feed: submit if a round is open and ours is
 // missing, crank closed rounds, claim rewards.
@@ -238,10 +239,23 @@ func (r *feedRunner) tick(ctx context.Context) error {
 			if err == nil && rd.HasSubmitted(slot) {
 				st.HasRound, st.LastRound = true, cur
 				_ = r.a.state.Save()
-			} else if err := r.submit(ctx, f, cur, st); err != nil {
-				r.log.Printf("round %d: %v", cur, err)
 			} else {
-				submittedNow = true
+				// headroom only when exactly one other provider is still to
+				// submit: then a race can make this call the finalising one
+				// after the simulation measured a plain submission
+				others := int(f.ActiveCount) - 1
+				if err == nil {
+					others -= len(rd.Submitted)
+				}
+				var headroom int64
+				if others == 1 {
+					headroom = submitFinaliseHeadroom
+				}
+				if err := r.submit(ctx, f, cur, st, headroom); err != nil {
+					r.log.Printf("round %d: %v", cur, err)
+				} else {
+					submittedNow = true
+				}
 			}
 		}
 	}
@@ -318,7 +332,7 @@ func (r *feedRunner) crank(ctx context.Context, f *gnochain.FeedInfo, sched gnoc
 }
 
 // submit fetches, validates and broadcasts the round's value.
-func (r *feedRunner) submit(ctx context.Context, f *gnochain.FeedInfo, round uint64, st *FeedState) error {
+func (r *feedRunner) submit(ctx context.Context, f *gnochain.FeedInfo, round uint64, st *FeedState, headroom int64) error {
 	fctx, cancel := context.WithTimeout(ctx, r.p.timeout)
 	samples := r.adapter.Fetch(fctx)
 	cancel()
@@ -370,10 +384,10 @@ func (r *feedRunner) submit(ctx context.Context, f *gnochain.FeedInfo, round uin
 	}
 
 	// A submission that completes the round finalises it in the same call
-	// (about 10M gas more than a plain Submit on v1.2.0); the simulation may
-	// run before the other providers' submissions land, so ask for that
-	// headroom rather than pay a failed transaction.
-	res, err := r.a.client.Call(ctx, r.a.cfg.Core, "Submit", gnochain.CallOpts{ExtraGas: submitFinaliseHeadroom}, u(r.fc.ID), u(round), i(value))
+	// (about 13M gas more than a plain Submit on v1.2.0); when the simulation
+	// may run before the last other submission lands, the caller passes that
+	// headroom rather than pay for a failed transaction.
+	res, err := r.a.client.Call(ctx, r.a.cfg.Core, "Submit", gnochain.CallOpts{ExtraGas: headroom}, u(r.fc.ID), u(round), i(value))
 	if err != nil {
 		if strings.Contains(err.Error(), "already submitted") {
 			st.HasRound, st.LastRound = true, round

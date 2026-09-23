@@ -1064,13 +1064,15 @@ configured feed against the pinned `gnoclient` (gno v1.2.0):
   for options, gas simulated before every send.
 - Evidence: `journal.jsonl` records every source response (clipped), the
   aggregated value, refusals and every transaction with hash, gas and fee.
-- Measured on gnodev (v1.2.0): `Submit` 17.7M to 18.4M gas, `Submit` that
-  also finalises 28.1M to 28.7M, `CatchUp` of one round 27.1M; at the 0.001
-  ugnot/gas minimum with the 25% estimate margin a submission costs about
-  0.023 GNOT. The agent adds 12M headroom to a `Submit` estimate because the
-  simulation can run before the other providers' submissions land and the
+- Measured on gnodev (v1.2.0): `Submit` 17.7M to 18.6M gas, `Submit` that
+  also finalises 28M to 32M (three providers), `CatchUp` of one round 27.1M;
+  at the 0.001 ugnot/gas minimum with the 25% estimate margin a submission
+  costs about 0.023 GNOT and the finalising one about 0.04 GNOT. When exactly
+  one other provider is still to submit, the agent adds 14M headroom to its
+  estimate: the simulation can run before that submission lands and the
   included call then finalises the round (observed on gnodev as one
-  out-of-gas failure per round before the fix).
+  out-of-gas failure per round before the fix). The client asks for the
+  larger of estimate plus margin and estimate plus headroom.
 - `configs/agent.dev.toml` and `agent.dev2.toml` run two providers against
   gnodev (`make agent-dev`); rounds reach consensus and finalise early when
   both submit. `make agent-soak` (`scripts/agent-soak.sh`) is the plan's
@@ -1155,8 +1157,8 @@ parallel by a second person from M3.
 | # | Milestone | Content | Exit criteria | Estimate |
 |---|---|---|---|---|
 | M0 | Spec | this document reviewed; decisions in §16 answered; toolchain pinned; repo scaffolded from `clockwork-gno-home`; `upgradeable/v0` mirrored into `deps/` | `make test` runs on v1.2.0 | **done 2026-09-23** |
-| M1 | Pure packages | `spec`, `agg`, `rounds`, `ledger`, `checkpoint`, `tally`, `params` with unit tests and gas pins | every invariant in §10.2 has a test; simulation skeleton | **done 2026-09-23** (gas pins and simulation skeleton still open) |
-| M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **in progress**: realms and realm tests done 2026-09-23; gnodev smoke (`make chain-test`), the 48 h agent soak and the v1b rollback rehearsal remain |
+| M1 | Pure packages | `spec`, `agg`, `rounds`, `ledger`, `checkpoint`, `tally`, `params` with unit tests and gas pins | every invariant in §10.2 has a test; simulation skeleton | **done 2026-09-23** (the `// Gas:` filetest pins move to M6; the economics tables are `docs/SIMULATION.md`) |
+| M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **done 2026-09-23**: realms and realm tests, `make chain-test` lifecycle on gnodev, the `impl/v2` accept-and-rollback rehearsal in `upgrade_test.gno`, and the multi-agent soak (`make agent-soak`, five-minute runs; the 48 h soak is part of the M6 testnet criteria) |
 | M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
 | M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages). Binding `kourt/impl/v2` to a deployed Kourt and the notifier bot's cranking move to M5/M6 |
 | M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`); `make agent-soak` integration scenario; container image and CI publishing to ghcr.io. Open: the acceptance run by two outside testers from the docs alone |
