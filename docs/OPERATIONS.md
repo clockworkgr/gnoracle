@@ -65,7 +65,10 @@ Then the genesis distribution (plan §8.2: 40% treasury, 25% incentives, 20%
 liquidity, 15% founders with vesting) with `token Transfer`, and the first
 parameter tuning by `SetParam` while the guardian still holds authority.
 `scripts/chain-test.sh` drives a whole lifecycle against gnodev and doubles
-as the deployment rehearsal checklist.
+as the deployment rehearsal checklist; `make agent-soak` then runs several
+agents and the bot against it and asserts the rounds, rewards and
+conservation checks (the CI workflow in `.github/workflows/ci.yml` runs the
+suites and publishes the image; the soak needs a chain and stays manual).
 
 ### Authority handover
 
@@ -122,9 +125,12 @@ gnoracle-bot -config bot.toml
   keep the tip when they are alive), `resolve` (after reveal ends, and after
   an appeal window), `kourt` (hourly), `settle` (daily, opted-in members).
   Each is idempotent on chain; a lost race costs one small fee.
-- **Docker**: `make docker`, then run `gnoracle-bot` from the image with the
-  config mounted at `/etc/gnoracle/bot.toml` and the key given as
-  `GNORACLE_MNEMONIC` (a dedicated low-balance key).
+- **Docker**: `make docker` locally, or pull `ghcr.io/clockworkgr/gnoracle`
+  (published by CI on every push to `main` and every `v*` tag); run
+  `gnoracle-bot` from the image with the config mounted at
+  `/etc/gnoracle/bot.toml` and the key given as `GNORACLE_MNEMONIC` (a
+  dedicated low-balance key). The image's entrypoint is `gnoracle-agent`;
+  override it with `--entrypoint gnoracle-bot` or `--entrypoint gnoracle`.
 
 ## 5. Running an agent
 

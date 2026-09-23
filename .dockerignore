@@ -1,0 +1,13 @@
+.git
+.gnohome
+.gnodev
+.dev-keys
+.dev-agent
+deps
+build
+bin
+docs
+gno.land
+scripts
+configs
+*.md

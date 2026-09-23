@@ -48,5 +48,7 @@ Toolchain target: `gnolang/gno v1.2.0` (the `gnoland-1` mainnet release), gno
   salt kept for you.
 
 Against the local chain: `make dev RPC=36657 WEB=38888`, `make chain-test`,
-then `make agent-dev` and `make bot-dev` (configs in `configs/*.dev.toml`).
-`make docker` builds one image with the three tools.
+then `make agent-dev` and `make bot-dev` (configs in `configs/*.dev.toml`),
+or `make agent-soak` for the automated multi-agent scenario with assertions.
+`make docker` builds one image with the three tools; CI publishes it as
+`ghcr.io/clockworkgr/gnoracle` on pushes to `main` and on version tags.

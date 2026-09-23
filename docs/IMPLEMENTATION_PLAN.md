@@ -1066,7 +1066,16 @@ configured feed against the pinned `gnoclient` (gno v1.2.0):
   out-of-gas failure per round before the fix).
 - `configs/agent.dev.toml` and `agent.dev2.toml` run two providers against
   gnodev (`make agent-dev`); rounds reach consensus and finalise early when
-  both submit.
+  both submit. `make agent-soak` (`scripts/agent-soak.sh`) is the plan's
+  integration scenario: it creates and funds provider keys, registers them
+  through the CLI, runs the agents and the bot for a few minutes and asserts
+  aggregated rounds with two or more submitters, consensus, rewards for
+  every agent, both conservation checks and the bot's announcements.
+- Shipping: one container image with the three tools (`Dockerfile`, built
+  from `golang:1.25` onto distroless, `CGO_ENABLED=0`); `.github/workflows/ci.yml`
+  runs the Go and Gno suites, checks the simulation report is current, and
+  publishes `ghcr.io/clockworkgr/gnoracle` on pushes to `main` and on `v*`
+  tags.
 
 ### 12.2 Notifier and cranker bot (`bot/`) — built
 
@@ -1143,7 +1152,7 @@ parallel by a second person from M3.
 | M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **in progress**: realms and realm tests done 2026-09-23; gnodev smoke (`make chain-test`), the 48 h agent soak and the v1b rollback rehearsal remain |
 | M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
 | M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages). Binding `kourt/impl/v2` to a deployed Kourt and the notifier bot's cranking move to M5/M6 |
-| M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`). Open: the outside-tester run and a published image |
+| M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`); `make agent-soak` integration scenario; container image and CI publishing to ghcr.io. Open: the acceptance run by two outside testers from the docs alone |
 | M6 | Testnet | deploy to `pearl-1`, found the court on the pearl-1 Kourt realm (`gno.land/r/g13khfsjnnq6g3lz2e997jejc9kvlz2x5yx08dr0/kourt2`, generation to confirm), soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback | soak criteria in §13 met | 5 wk |
 | M7 | Audit and mainnet | external audit, fixes, mutation run, mainnet `addpkg` approvals, PYTH genesis distribution, Gnoswap pool, first feeds (gnomarket outcomes, GNOT/USD), guardian handover scheduled | audit findings closed; at least 25 stakers | 6 wk + audit lead time |
 

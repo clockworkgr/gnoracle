@@ -25,7 +25,7 @@ export NS
 
 PKGS := ./gno.land/...
 
-.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim
+.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim agent-soak
 
 help: ## this list
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | awk -F ":.*## " "{ printf \"  %-10s %s\\n\", \$$1, \$$2 }"
@@ -89,6 +89,9 @@ agent-dev: go-build ## run a provider agent (prov2) against the local chain on R
 
 bot-dev: go-build ## run the bot against the local chain, messages to the log
 	GNORACLE_KEY_PASSWORD=$${GNOKEY_PASSWORD:-devpassword} ./bin/gnoracle-bot -config configs/bot.dev.toml
+
+agent-soak: ## run several agents and the bot against the local chain for a few minutes and assert (needs chain-test first)
+	@./scripts/agent-soak.sh
 
 docker: ## build the gnoracle image with the three tools
 	docker build -t gnoracle .
