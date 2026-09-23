@@ -30,13 +30,18 @@ PKGS := ./gno.land/...
 help: ## this list
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | awk -F ":.*## " "{ printf \"  %-10s %s\\n\", \$$1, \$$2 }"
 
-toolchain: ## build the pinned gno ($(GNO_REF)) into $(GNO_STORE) (once)
+toolchain: ## build the pinned gno and gnokey ($(GNO_REF)) into $(GNO_STORE) (once)
 	@if [ ! -x "$(GNO)" ]; then \
 		echo "building gno $(GNO_REF) into $(GNO_STORE) (once)"; \
 		mkdir -p "$(GNO_STORE)"; \
 		GOBIN="$(GNO_STORE)" go install "github.com/gnolang/gno/gnovm/cmd/gno@$(GNO_REF)" || exit 1; \
 	fi; \
-	echo "gno: $(GNO)"; echo "GNOROOT: $(GNOROOT)"
+	if [ ! -x "$(GNOKEY)" ]; then \
+		echo "building gnokey $(GNO_REF) into $(GNO_STORE) (once; make deps reads the chain with it)"; \
+		mkdir -p "$(GNO_STORE)"; \
+		GOBIN="$(GNO_STORE)" go install "github.com/gnolang/gno/gno.land/cmd/gnokey@$(GNO_REF)" || exit 1; \
+	fi; \
+	echo "gno: $(GNO)"; echo "gnokey: $(GNOKEY)"; echo "GNOROOT: $(GNOROOT)"
 
 deps: ## mirror on-chain dependencies into deps/ (needed for the realms, not the pure packages)
 	@./scripts/deps.sh

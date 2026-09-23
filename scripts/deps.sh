@@ -15,13 +15,26 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 gnokey="${GNOKEY:-gnokey}"
 source_remote="${SOURCE_REMOTE:-https://rpc.gno.land:443}"
+if ! command -v "$gnokey" >/dev/null 2>&1; then
+  echo "deps: gnokey not found at '$gnokey' (run make toolchain, or set GNOKEY)" >&2
+  exit 1
+fi
 addr_ns="g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm"
 own_p="gno.land/p/clockwork/gnoracle/"   # packages of this workspace: never fetched
 own_r="gno.land/r/clockwork/gnoracle/"
 
 [ "${FORCE:-}" = 1 ] && rm -rf "$here/deps"
 
-qfile() { "$gnokey" query vm/qfile -data "$1" -remote "$source_remote" 2>/dev/null | sed '1d; s/^data: //'; }
+# qfile prints a package's file list or a file's content; a failed query
+# (unknown package, unreachable remote) prints the node's message and fails.
+qfile() {
+  local out
+  if ! out="$("$gnokey" query vm/qfile -data "$1" -remote "$source_remote" 2>&1)"; then
+    echo "deps: query $1 on $source_remote failed: $(printf '%s' "$out" | head -3 | tr '\n' ' ')" >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | sed '1d; s/^data: //'
+}
 
 # fetch_pkg <import path> [<on-chain path>]: mirror one package.
 fetch_pkg() {
@@ -39,7 +52,10 @@ fetch_pkg() {
     esac
   done
   if [ "$src" != "$p" ]; then
-    sed -i '' -e "s#$src#$p#g" "$d"/*.gno "$d/gnomod.toml"
+    # portable in-place rewrite (BSD and GNU sed disagree on -i)
+    for f in "$d"/*.gno "$d/gnomod.toml"; do
+      sed -e "s#$src#$p#g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    done
   fi
   echo "deps: $p <- $source_remote${2:+ ($2)}"
 }
