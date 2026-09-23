@@ -1,0 +1,36 @@
+# Notifier and cranker against the local gnodev, posting to the log.
+remote   = "http://127.0.0.1:36657"
+chain_id = "dev"
+core     = "gno.land/r/clockwork/gnoracle/core"
+dao      = "gno.land/r/clockwork/gnoracle/dao"
+kourt    = "gno.land/r/clockwork/gnoracle/kourt"
+gnoweb   = "http://127.0.0.1:38888"
+key_home = ".dev-keys"
+key      = "test1"
+state    = ".dev-agent/bot-state.json"
+poll     = "5s"
+max_blocks = 500
+events = ["RoundFinalized", "Submitted", "DisputeOpened", "DisputeBallotOpened", "DisputeRolled", "AppealOpened", "DisputeDecided", "DisputeResolved", "ProposalCreated", "ProposalStatus", "ProviderJailed", "ProviderSlashed", "KourtDissent", "FeedActivated", "ReleaseAccepted", "ReleaseRolledBack"]
+
+[telegram]
+token = ""    # empty: messages go to the log
+chat = 0
+
+[[members]]
+addr = "g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5"
+name = "test1"
+settle = true
+
+[remind]
+hours = [24, 2]
+every = "1m"
+
+[crank]
+finalize = true
+resolve = true
+kourt = true
+settle = true
+every = "30s"
+kourt_every = "2m"
+settle_every = "2m"
+finalize_grace = "20s"

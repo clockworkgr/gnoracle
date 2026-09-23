@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	json "gno.land/p/onbloc/json/v0"
+
 	"gno.land/p/clockwork/gnoracle/tally/v0"
 	"gno.land/p/nt/testutils/v0"
 	"gno.land/p/nt/uassert/v0"
@@ -372,4 +374,40 @@ func TestAppealReversesRoundOne(cur realm, t *testing.T) {
 	health(t)
 	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
 	uassert.True(t, token.TotalSupply() > 0)
+}
+
+// TestJSONBallots checks the DAO machine views the bot and CLI read.
+func TestJSONBallots(cur realm, t *testing.T) {
+	for _, path := range []string{"json", "json/now", "json/member/" + string(alice), "json/member/" + string(stranger), "json/members",
+		"json/ballot/1", "json/ballot/dispute/1", "json/ballot/dispute/999", "json/ballots", "json/ballots/1/2",
+		"json/commit/1/" + string(alice), "json/reveal/1/" + string(alice), "json/proposals", "json/params", "json/health", "json/ballot/x"} {
+		out := dao.Render(cross(cur), path)
+		if _, err := json.Unmarshal([]byte(out)); err != nil {
+			t.Fatalf("%s: not JSON: %v\n%s", path, err, out)
+		}
+	}
+	b, _ := json.Unmarshal([]byte(dao.Render(cross(cur), "json/ballot/dispute/1")))
+	phase, _ := b.MustKey("phase").GetString()
+	uassert.Equal(t, dao.BallotResolved, phase)
+	d, _ := b.MustKey("dispute").GetNumeric()
+	uassert.Equal(t, float64(1), d)
+	uassert.True(t, b.HasKey("revealEnds"))
+
+	// the voters are the DAO members staked by the staking stories
+	m, _ := json.Unmarshal([]byte(dao.Render(cross(cur), "json/member/"+string(alice))))
+	exists, _ := m.MustKey("exists").GetBool()
+	uassert.True(t, exists)
+	uassert.True(t, m.HasKey("power"))
+	none, _ := json.Unmarshal([]byte(dao.Render(cross(cur), "json/member/"+string(dave))))
+	daveExists, _ := none.MustKey("exists").GetBool()
+	uassert.False(t, daveExists)
+
+	committedVoters := 0
+	for _, who := range []address{alice, bob, carol} {
+		c, _ := json.Unmarshal([]byte(dao.Render(cross(cur), "json/commit/1/"+string(who))))
+		if committed, _ := c.MustKey("committed").GetBool(); committed {
+			committedVoters++
+		}
+	}
+	uassert.True(t, committedVoters >= 1)
 }

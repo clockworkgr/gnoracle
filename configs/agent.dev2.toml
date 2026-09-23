@@ -1,0 +1,18 @@
+# Second local provider (test1) so rounds reach consensus on gnodev.
+remote   = "http://127.0.0.1:36657"
+chain_id = "dev"
+core     = "gno.land/r/clockwork/gnoracle/core"
+key_home = ".dev-keys"
+key      = "test1"
+state    = ".dev-agent/test1-state.json"
+journal  = ".dev-agent/test1-journal.jsonl"
+poll     = "2s"
+dev_tick = true
+
+[[feeds]]
+id = 1
+jitter = "2s"
+finalize_delay = "6s"
+[feeds.source]
+adapter = "exec"
+command = ["sh", "-c", "printf '1.00%02d\\n' $((RANDOM % 40))"]

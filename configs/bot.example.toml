@@ -1,0 +1,56 @@
+# gnoracle-bot configuration. Copy to bot.toml and edit.
+#
+# The bot follows every block, announces protocol events with their
+# deadlines, reminds opted-in members before commit and reveal phases close,
+# and cranks the entry points anyone may call. Cranking needs a funded key;
+# announcing does not.
+
+remote   = "https://rpc.gno.land:443"
+chain_id = "gnoland-1"
+core     = "gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/core"
+dao      = "gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/dao"
+kourt    = "gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/kourt"
+gnoweb   = "https://gno.land"                    # links in messages
+key_home = "/var/lib/gnoracle/keys"
+key      = "cranker"
+# password_file = "/var/lib/gnoracle/password"
+state    = "/var/lib/gnoracle/bot-state.json"    # scan cursor and what was already sent
+poll     = "10s"
+start_height = 0                                 # first run: 0 = start at the chain head
+max_blocks = 300                                 # per tick
+
+[gas]
+mode = "estimate"
+wanted = 60000000
+price = "0.001ugnot"
+
+[telegram]
+token = ""            # BotFather token; empty logs the messages instead
+chat = 0              # channel or group id the bot posts to
+echo = false          # also log every message
+
+# Members who opted in to direct reminders and to having their ballots
+# settled by the bot (SettleMember is permissionless; it applies their
+# pending penalties and rewards).
+# [[members]]
+# addr = "g1..."
+# chat = 123456789    # their Telegram user id (they must /start the bot first)
+# name = "alice"
+# settle = true
+
+[remind]
+hours = [24, 2]       # before a commit or reveal deadline
+every = "10m"
+
+[crank]
+finalize = true       # CatchUp rounds still open after finalize_grace
+resolve = true        # ResolveDispute after the reveal phase and after appeal windows
+kourt = true          # Crank the Kourt mirror of resolved disputes
+settle = true         # SettleMember for the members above
+every = "60s"
+kourt_every = "1h"
+settle_every = "24h"
+finalize_grace = "120s"   # leave the feed's own agents the finaliser tip first
+catch_up_empty = true     # also write off rounds nobody submitted to
+
+# events = [ ... ]    # override the announced event types (see bot.DefaultEvents)

@@ -12,8 +12,18 @@ import (
 func (*implV1) Render(_ int, rlm realm, path string) string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	switch {
+	case parts[0] == "json":
+		return renderJSON(parts[1:])
 	case path == "" || parts[0] == "feeds":
 		return renderFeeds(parts)
+	case parts[0] == "disputes":
+		return renderDisputes()
+	case parts[0] == "dispute" && len(parts) >= 2:
+		id, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return "unknown dispute"
+		}
+		return renderDispute(id)
 	case parts[0] == "feed" && len(parts) >= 2:
 		id, err := strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
@@ -42,7 +52,7 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 func renderFeeds(parts []string) string {
 	var b strings.Builder
 	b.WriteString("# Gnoracle\n\nAn oracle DAO on gno.land. Serving `" + core.LivePath() + "`.\n\n")
-	b.WriteString("Pages: [feeds](:feeds) · [health](:health) · [parameters](:params) · [releases](:releases)\n\n")
+	b.WriteString("Pages: [feeds](:feeds) · [disputes](:disputes) · [health](:health) · [parameters](:params) · [releases](:releases)\n\n")
 	b.WriteString("## Feeds\n\n| id | name | kind | status | providers | value (delayed) |\n|---|---|---|---|---|---|\n")
 	page := 0
 	if len(parts) >= 2 {

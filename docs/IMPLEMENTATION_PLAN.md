@@ -483,7 +483,7 @@ permissionless.
 
 ### 5.3 Value at risk shown to consumers
 
-`FeedInfo(feedID)` and the feed page report `securityBudget = Σ active stake
+`:json/feed/<id>` and the feed page report `securityBudget = Σ active stake
 x majorSlashBps / 10000`, `corruptionThreshold = ceil(n/2)` providers, and
 `maxValueAtRisk = 50% x securityBudget x corruptionThreshold / n` (the
 research pass's rule of thumb from UMA's cost-of-corruption > profit-from-
@@ -502,7 +502,7 @@ Consumer realms import the permanent `core` realm and call:
 func Read(cur realm, feedID uint64) (value int64, decimals int, roundID uint64, updatedAt int64, tier string)
 func ReadOption(cur realm, feedID uint64) (option int, label string, roundID uint64, updatedAt int64, tier string)
 func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
-func FeedInfo(feedID uint64) string        // JSON view, no fresh values
+Render(":json/feed/<id>") string           // machine view (Appendix D), fresh values delayed
 ```
 
 `Read` is a crossing call because it debits the caller's credit and writes.
@@ -511,7 +511,7 @@ The returned `tier` is `consensus`, `provisional`, `final`, `disputed`,
 e.g. `final,unfunded`) or `none`. A consumer that sets `finalOnly` on its
 credit record receives the latest `final` round instead and pays half price.
 
-Free access exists and is bounded on purpose: `Render` and `FeedInfo` are
+Free access exists and is bounded on purpose: `Render` and the `:json` views are
 non-crossing and any realm or `vm/qeval` can call them, so they show values
 only once `final` and at least `renderDelay` (default 10 minutes, Pyth Network Pro's
 delayed-tier convention) old. Fresh data costs a credit; delayed data is a
@@ -1030,33 +1030,77 @@ the table is fee estimation for agents and a regression guard.
 
 ## 12. Off-chain components
 
-### 12.1 Provider agent (`agent/`, Go)
+### 12.1 Provider agent (`agent/`, Go) — built
 
-- Config: key, RPC, feed IDs, per-feed source adapter and parameters, gas and
-  deposit ceilings, at least three declared upstream sources per price feed.
-- Loop per feed: cache the spec from `FeedInfo`; compute the current round
-  from chain time; at `open + jitter` run the adapter, validate the value
-  (type, range, `sanityBps` against the previous aggregate), broadcast
-  `Submit`; after the window broadcast `Finalize` if needed (the tip and the
-  alerter share pay for it); claim rewards weekly; alert on jail.
-- Adapters in v1: HTTP JSON with a JSONPath and a median across N URLs,
-  Gnoswap pool TWAP via qeval, and an `exec` adapter for one-off outcomes a
-  human confirms.
-- Safety: refuse to submit a value that deviates more than `sanityBps` from
-  the last aggregate without an operator override; log every submission with
-  raw source responses (the operator's evidence in a dispute).
-- Ships as one binary and a Docker image; a `gnodev` scenario runs three
-  agents against a local chain for the integration tests.
+`gnoracle-agent` (`cmd/gnoracle-agent`, package `agent`) runs one loop per
+configured feed against the pinned `gnoclient` (gno v1.2.0):
 
-### 12.2 Notifier and cranker bot (`bot/`)
+- Config `agent.toml` (`configs/agent.example.toml`): chain, key (a gnokey
+  keybase copied into memory at start, or `GNORACLE_MNEMONIC`), gas policy,
+  alert channel, one `[[feeds]]` table per feed with a source adapter and
+  safety bounds.
+- Each tick (default 5 s) reads `:json/feed/<id>` (one query carries block
+  time, schedule, slots and the delayed aggregate), computes the round from
+  chain time, and: cranks `CatchUp` for closed rounds after
+  `finalize_delay` (adaptive batch, halved on out-of-gas); fetches, checks
+  and submits when the round is open and our slot has not submitted (it
+  reads `:json/feed/<id>/round/<r>`'s submitted mask first, so a restart never
+  double-submits); claims rewards on `claim_every`.
+- Adapters: `http` (median across URLs with a JSON path, headers, scale,
+  `min_sources`), `gnoswap` (`OracleConsult` tick TWAP on
+  `gno.land/r/gnoswap/pool`, converted with the tokens' decimals), `qeval`
+  (any integer view), `exec` (a script), `file` (a human-written answer for
+  one-off outcomes; the agent waits until the file exists).
+- Safety: absolute `min`/`max`, `sanity_bps` against the agent's last
+  submission or the public delayed aggregate (refusal is journaled and
+  alerted; `override` forces), lower-median aggregation and a plurality rule
+  for options, gas simulated before every send.
+- Evidence: `journal.jsonl` records every source response (clipped), the
+  aggregated value, refusals and every transaction with hash, gas and fee.
+- Measured on gnodev (v1.2.0): `Submit` 17.7M to 18.4M gas, `Submit` that
+  also finalises 28.1M to 28.7M, `CatchUp` of one round 27.1M; at the 0.001
+  ugnot/gas minimum with the 25% estimate margin a submission costs about
+  0.023 GNOT. The agent adds 12M headroom to a `Submit` estimate because the
+  simulation can run before the other providers' submissions land and the
+  included call then finalises the round (observed on gnodev as one
+  out-of-gas failure per round before the fix).
+- `configs/agent.dev.toml` and `agent.dev2.toml` run two providers against
+  gnodev (`make agent-dev`); rounds reach consensus and finalise early when
+  both submit.
 
-Penalties make notification part of the protocol. A Telegram (later Discord)
-bot watches tx-indexer events `DisputeOpened`, `DisputeRolled`, `AppealOpened`,
-`ProposalCreated`, `ProviderJailed`, `KourtDissent`, `ReleaseProposed`,
-`ReleaseAccepted`, posts deadlines with countdowns, and sends direct reminders
-24 h and 2 h before a reveal closes to registered members. It also cranks:
-`Finalize` on stale rounds, `ResolveDispute` after reveal, `KourtCrank`
-daily, and `SettleMember` for opted-in addresses.
+### 12.2 Notifier and cranker bot (`bot/`) — built
+
+`gnoracle-bot` (`cmd/gnoracle-bot`, package `bot`) needs no indexer: it
+reads `block_results` from the node's JSON-RPC and decodes the `/tm.Event`
+entries of successful transactions, filtered to the three realms.
+
+- Announces (Telegram Bot API over HTTPS, or the log when no token is set)
+  the event types in `events` (default: dispute lifecycle, proposals,
+  provider jail/slash/eject, feed lifecycle, releases, authority, params,
+  Kourt dissent) with the deadlines fetched from the `:json` views and a
+  gnoweb link.
+- Reminders: every 10 minutes it derives each running ballot's phase from
+  block time and posts 24 h and 2 h before the commit and reveal deadlines,
+  naming the opted-in members who have not acted, and messages them
+  directly; the reveal opening is announced once.
+- Cranks (with a key): `CatchUp` for feeds whose next round closed more than
+  `finalize_grace` (120 s) ago, so live agents keep the tip; `ResolveDispute`
+  once a ballot's reveal ended or a decided round's appeal window passed;
+  Kourt `Crank` hourly for resolved disputes whose mirror is not terminal
+  (a `dissent` result is posted); `SettleMember` daily for opted-in members
+  with unprocessed resolved ballots. Each attempt is rate-limited in the
+  state file; a lost race with another cranker costs one small fee.
+- State: `bot-state.json` (scan cursor, announcements sent, attempts).
+
+### 12.2a Operator CLI (`cmd/gnoracle`)
+
+`gnoracle` reads every `:json` view (`status`, `feed`, `round`, `providers`,
+`dispute`, `ballot`, `member`, `params`, `health`, `kourt`) and sends every
+transaction with unit-aware amounts (`10000gnot`), feed-unit values
+(`submit 1 current 1.2345`), and `commit`/`reveal` that generate the salt,
+compute the commitment (`tally.Commitment`, cross-checked by test vectors)
+and keep the salt file under `~/.gnoracle/votes` until the reveal is on
+chain.
 
 ### 12.3 gnoweb pages (`Render`)
 
@@ -1099,7 +1143,7 @@ parallel by a second person from M3.
 | M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **in progress**: realms and realm tests done 2026-09-23; gnodev smoke (`make chain-test`), the 48 h agent soak and the v1b rollback rehearsal remain |
 | M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
 | M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages). Binding `kourt/impl/v2` to a deployed Kourt and the notifier bot's cranking move to M5/M6 |
-| M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | 3 wk |
+| M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`). Open: the outside-tester run and a published image |
 | M6 | Testnet | deploy to `pearl-1`, found the court on the pearl-1 Kourt realm (`gno.land/r/g13khfsjnnq6g3lz2e997jejc9kvlz2x5yx08dr0/kourt2`, generation to confirm), soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback | soak criteria in §13 met | 5 wk |
 | M7 | Audit and mainnet | external audit, fixes, mutation run, mainnet `addpkg` approvals, PYTH genesis distribution, Gnoswap pool, first feeds (gnomarket outcomes, GNOT/USD), guardian handover scheduled | audit findings closed; at least 25 stakers | 6 wk + audit lead time |
 
@@ -1337,3 +1381,40 @@ rewardUgnot}`, `PenaltyCapped{member, forgiven}`, `ProposalCreated{id, kind}`,
 | `maxMintPerYearBps` | 200 | 0 to 1000 | 9.1 |
 | `guardianHandoverMembers` | 25 | | 8.6 |
 | `stakeDenom` | `ugnot` | `ugnot` or a grc20reg key | 15 |
+
+## Appendix D: machine views
+
+Every realm serves JSON under `Render(":json/...")` (read with `vm/qrender`,
+`gnoracle`, or any HTTP client through gnoweb). Objects carry `now` (block
+time) so readers compute rounds without a second query; values obey the
+render delay of §6.1 (`"delayed": true` until final and `renderDelay` old).
+Unknown members must be ignored by readers; releases may add fields.
+
+`core`:
+
+| path | content |
+|---|---|
+| `json/now` | `now`, `height`, `live` |
+| `json/feeds[/<offset>[/<count>]]` | `total`, `feeds[]` summaries (id, name, kind, valueType, status, startAt, interval, submitWindow, decimals, activeCount, maxProviders, haveLast, lastFinalized, openDisputes) |
+| `json/feed/<id>` | the feed record, `slots[15]`, `currentRound` with `currentOpenAt`/`currentCloseAt`, `value` once delayed, `spec{...}` |
+| `json/feed/<id>/round/<r or current>` | `exists`, `status`, `opensAt`, `closesAt`, `open`, `closed`, `submittedMask`, `submitted[]{slot,addr}`, and once delayed `value` and `values[]{slot,addr,value,eligible}` |
+| `json/feed/<id>/rounds[/<n>]` | the last `n` round records |
+| `json/feed/<id>/provider/<addr>` | the provider record (stake, status, slot, obligedFrom, misses, strikes, jailings, rewards) |
+| `json/feed/<id>/providers` | all providers of the feed |
+| `json/dispute/<id>` | the dispute record with `appealWindowEnds` while decided |
+| `json/disputes[/<from>[/<count>]]` | `total`, `disputes[]` |
+| `json/credit/<addr>` | a consumer's credit |
+| `json/params`, `json/health` | the registry and the conservation check |
+
+`dao`: `json/now` (epoch, totals), `json/member/<addr>` (power, cursor,
+pending rewards, `feesOwed`), `json/members`, `json/ballot/<seq>`,
+`json/ballot/dispute/<id>`, `json/ballots[/<from>[/<count>]]` (the most
+recent page by default), `json/commit/<seq>/<addr>`,
+`json/reveal/<seq>/<addr>`, `json/proposal/<id>`, `json/proposals`,
+`json/params`, `json/health`. A ballot's `phase` is the last phase written
+on chain; readers derive the live phase from `commitEnds`/`revealEnds`.
+
+`kourt`: `json/now` (court, bound Kourt path, counts), `json/record/<dispute>`,
+`json/records[/<from>[/<count>]]`.
+
+The Go structs in `internal/gnochain/views.go` mirror these objects.

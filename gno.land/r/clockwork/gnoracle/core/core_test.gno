@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	json "gno.land/p/onbloc/json/v0"
+
 	"chain"
 
 	"gno.land/p/nt/uassert/v0"
@@ -461,4 +463,42 @@ func TestGates(cur realm, t *testing.T) {
 	testing.SetRealm(testing.NewCodeRealm("gno.land/r/demo/intruder"))
 	uassert.AbortsContains(t, cur, "must be called directly", func() { core.Register(cross(cur), 1, "") })
 	health(t)
+}
+
+// TestJSONViews checks the machine views parse and carry the fields the
+// off-chain tools depend on (the earlier stories left feed 1 in place).
+func TestJSONViews(cur realm, t *testing.T) {
+	for _, path := range []string{"json", "json/now", "json/feeds", "json/feeds/0/2", "json/feed/1", "json/feed/1/round/0", "json/feed/1/round/current",
+		"json/feed/1/rounds/5", "json/feed/1/providers", "json/feed/1/provider/" + string(alice), "json/disputes", "json/credit/" + string(consumer),
+		"json/health", "json/params", "json/feed/999", "json/feed/x", "json/nothing"} {
+		out := core.Render(cross(cur), path)
+		if _, err := json.Unmarshal([]byte(out)); err != nil {
+			t.Fatalf("%s: not JSON: %v\n%s", path, err, out)
+		}
+	}
+	feed, err := json.Unmarshal([]byte(core.Render(cross(cur), "json/feed/1")))
+	uassert.NoError(t, err)
+	id, _ := feed.MustKey("id").GetNumeric()
+	uassert.Equal(t, float64(1), id)
+	slots, _ := feed.MustKey("slots").GetArray()
+	uassert.Equal(t, 15, len(slots))
+	dec, _ := feed.MustKey("spec").MustKey("decimals").GetNumeric()
+	uassert.Equal(t, float64(6), dec)
+	now, _ := feed.MustKey("now").GetNumeric()
+	uassert.True(t, now > 0)
+	// the harness clock sits before the feed's start here, so the schedule
+	// view reports the feed as not started rather than a current round
+	current, _ := json.Unmarshal([]byte(core.Render(cross(cur), "json/feed/1/round/current")))
+	uassert.True(t, current.HasKey("started") || current.HasKey("id"))
+
+	missing, _ := json.Unmarshal([]byte(core.Render(cross(cur), "json/feed/999")))
+	uassert.True(t, missing.HasKey("error"))
+
+	rounds, _ := json.Unmarshal([]byte(core.Render(cross(cur), "json/feed/1/rounds/3")))
+	list, _ := rounds.MustKey("rounds").GetArray()
+	uassert.True(t, len(list) >= 1)
+	uassert.True(t, list[0].HasKey("closesAt"))
+
+	uassert.True(t, strings.HasPrefix(core.Render(cross(cur), "disputes"), "# Disputes"))
+	uassert.Equal(t, "unknown dispute", core.Render(cross(cur), "dispute/999"))
 }

@@ -11,6 +11,8 @@ import (
 func (*implV1) Render(_ int, rlm realm, path string) string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	switch {
+	case parts[0] == "json":
+		return renderJSON(parts[1:])
 	case path == "" || parts[0] == "proposals":
 		return renderHome()
 	case parts[0] == "proposal" && len(parts) >= 2:

@@ -25,7 +25,7 @@ export NS
 
 PKGS := ./gno.land/...
 
-.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean
+.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim
 
 help: ## this list
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | awk -F ":.*## " "{ printf \"  %-10s %s\\n\", \$$1, \$$2 }"
@@ -76,5 +76,25 @@ build: ## build/ with paths rewritten to NS
 deploy: ## addpkg every package under NS (skips what is live)
 	@./scripts/deploy.sh deploy
 
-clean: ## remove build/, deps/ and the local download cache
-	rm -rf build deps .gnohome
+# ---- off-chain tools (Go): provider agent, notifier/cranker bot, operator CLI
+
+go-build: ## build bin/gnoracle, bin/gnoracle-agent, bin/gnoracle-bot
+	CGO_ENABLED=0 go build -o bin/ ./cmd/...
+
+go-test: ## unit tests of the Go tools
+	go test ./...
+
+agent-dev: go-build ## run a provider agent (prov2) against the local chain on RPC=$(RPC)
+	GNORACLE_KEY_PASSWORD=$${GNOKEY_PASSWORD:-devpassword} ./bin/gnoracle-agent -config configs/agent.dev.toml
+
+bot-dev: go-build ## run the bot against the local chain, messages to the log
+	GNORACLE_KEY_PASSWORD=$${GNOKEY_PASSWORD:-devpassword} ./bin/gnoracle-bot -config configs/bot.dev.toml
+
+docker: ## build the gnoracle image with the three tools
+	docker build -t gnoracle .
+
+sim: ## regenerate docs/SIMULATION.md from the plan's parameters and measured gas
+	go run ./sim > docs/SIMULATION.md
+
+clean: ## remove build/, bin/, deps/ and the local download cache
+	rm -rf build bin deps .gnohome

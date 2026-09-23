@@ -5,7 +5,9 @@
 # throwaway keybase holding the public test1 dev key, created by `make dev-keys`
 /.dev-keys/
 /.gnodev/
-# Go build output for agent/, bot/, sim/
+# Go build output for cmd/ (agent, bot, cli)
 /bin/
+# local agent/bot state, journals and logs from make agent-dev / bot-dev
+/.dev-agent/
 # repo-local gno download cache (see Makefile)
 /.gnohome/

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"gno.land/p/clockwork/gnoracle/jsonw/v0"
 	"gno.land/r/clockwork/gnoracle/core"
 	"gno.land/r/clockwork/gnoracle/kourt"
 	kv "gno.land/r/clockwork/gnoracle/kourtdev"
@@ -177,6 +178,9 @@ func u(v uint64) string { return strconv.FormatUint(v, 10) }
 
 // Render lists the mirror records with the attribution the licence asks for.
 func (*implV1) Render(_ int, rlm realm, path string) string {
+	if strings.HasPrefix(path, "json") {
+		return renderJSON(strings.Split(strings.Trim(strings.TrimPrefix(path, "json"), "/"), "/"))
+	}
 	var b strings.Builder
 	b.WriteString("# Gnoracle Kourt mirror\n\n")
 	b.WriteString("[built on Kourt](https://kourt.xyz) · court `" + kourt.CourtSlug + "` on `" + kourtPath + "`\n\n")
@@ -202,3 +206,57 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 }
 
 const kourtPath = "gno.land/r/clockwork/gnoracle/kourtdev"
+
+// renderJSON serves `:json/now`, `:json/record/<dispute>` and
+// `:json/records[/<from>[/<count>]]` for the bot's Kourt cranking.
+func renderJSON(parts []string) string {
+	head := func() *jsonw.Object {
+		return jsonw.New().Int("now", now()).Str("live", kourt.LivePath()).Str("court", kourt.CourtSlug).Str("kourt", kourtPath).
+			Uint("count", kourt.Count()).Uint("disputes", core.DisputeCount())
+	}
+	if len(parts) == 0 || parts[0] == "" || parts[0] == "now" {
+		return head().String()
+	}
+	switch parts[0] {
+	case "record":
+		if len(parts) < 2 {
+			return jsonw.Error("dispute id missing")
+		}
+		id, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return jsonw.Error("bad dispute id")
+		}
+		rec := kourt.GetRecord(id)
+		if rec == nil {
+			return head().Uint("dispute", id).Bool("exists", false).String()
+		}
+		return jsonRecord(rec).String()
+	case "records":
+		from, count := int64(1), int64(25)
+		if len(parts) >= 2 {
+			if n, err := strconv.ParseInt(parts[1], 10, 64); err == nil && n >= 1 {
+				from = n
+			}
+		}
+		if len(parts) >= 3 {
+			if n, err := strconv.ParseInt(parts[2], 10, 64); err == nil && n > 0 && n <= 100 {
+				count = n
+			}
+		}
+		a := jsonw.NewArray()
+		total := core.DisputeCount()
+		for id := uint64(from); id <= total && int64(a.Len()) < count; id++ {
+			if rec := kourt.GetRecord(id); rec != nil {
+				a.Raw(jsonRecord(rec).String())
+			}
+		}
+		return head().Raw("records", a.String()).String()
+	}
+	return jsonw.Error("unknown json path")
+}
+
+func jsonRecord(rec *kourt.Record) *jsonw.Object {
+	return jsonw.New().Int("now", now()).Uint("dispute", rec.Dispute).Bool("exists", true).Str("state", rec.State).Uint("claim", rec.ClaimID).
+		Str("title", rec.Title).Int("openedAt", rec.OpenedAt).Int("stakedAt", rec.StakedAt).Int("answeredAt", rec.AnsweredAt).
+		Int("settledAt", rec.SettledAt).Int("verdict", int64(rec.Verdict)).Str("route", rec.Route).Int("stake", rec.Stake).Int("steps", rec.Steps)
+}

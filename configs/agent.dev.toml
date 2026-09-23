@@ -1,0 +1,26 @@
+# Provider agent against the local gnodev (make dev RPC=36657 WEB=38888),
+# signing as prov2 from the throwaway keybase chain-test created.
+remote   = "http://127.0.0.1:36657"
+chain_id = "dev"
+core     = "gno.land/r/clockwork/gnoracle/core"
+key_home = ".dev-keys"
+key      = "prov2"
+state    = ".dev-agent/prov2-state.json"
+journal  = ".dev-agent/prov2-journal.jsonl"
+poll     = "2s"
+dev_tick = true   # gnodev only: keep chain time moving
+
+[gas]
+mode = "estimate"
+wanted = 60000000
+price = "0.001ugnot"
+
+[[feeds]]
+id = 1
+jitter = "1s"
+sanity_bps = 2000
+finalize_delay = "3s"
+[feeds.source]
+adapter = "http"
+urls = ["http://127.0.0.1:38999/price.json"]
+path = "data.amount"

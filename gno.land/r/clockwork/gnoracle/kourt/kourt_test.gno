@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	json "gno.land/p/onbloc/json/v0"
+
 	"chain"
 	"chain/banker"
 
@@ -248,4 +250,21 @@ func TestMirrorRefusesUnresolvedAndStrangers(cur realm, t *testing.T) {
 	testing.SetRealm(testing.NewUserRealm(watcher))
 	nosend()
 	uassert.AbortsContains(t, cur, "not the authority", func() { kourt.RedeemFloat(cross(cur), 1) })
+}
+
+// TestJSONRecords checks the mirror's machine views.
+func TestJSONRecords(cur realm, t *testing.T) {
+	for _, path := range []string{"json", "json/now", "json/record/1", "json/record/999", "json/records", "json/records/1/5", "json/record/x", "json/other"} {
+		out := kourt.Render(cross(cur), path)
+		if _, err := json.Unmarshal([]byte(out)); err != nil {
+			t.Fatalf("%s: not JSON: %v\n%s", path, err, out)
+		}
+	}
+	all, _ := json.Unmarshal([]byte(kourt.Render(cross(cur), "json/records")))
+	recs, _ := all.MustKey("records").GetArray()
+	uassert.True(t, len(recs) >= 1)
+	state, _ := recs[0].MustKey("state").GetString()
+	uassert.True(t, state != "")
+	court, _ := all.MustKey("court").GetString()
+	uassert.Equal(t, kourt.CourtSlug, court)
 }

@@ -1,0 +1,90 @@
+# gnoracle-agent configuration. Copy to agent.toml and edit.
+#
+# The agent signs Submit, CatchUp and ClaimRewards, so it needs a funded key.
+# Keep the key on the agent host only; use a session key or a dedicated
+# provider key, never the treasury key. The password comes from
+# $GNORACLE_KEY_PASSWORD or password_file; a mnemonic in $GNORACLE_MNEMONIC
+# replaces key_home for containers.
+
+remote   = "https://rpc.gno.land:443"            # gnoland-1; pearl-1: https://rpc.pearl.gno.land:443 (check the current endpoint)
+chain_id = "gnoland-1"
+core     = "gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/core"
+key_home = "/var/lib/gnoracle/keys"              # a gnokey keybase directory
+key      = "provider"                            # key name or address
+# password_file = "/var/lib/gnoracle/password"
+state    = "/var/lib/gnoracle/agent-state.json"  # what was submitted; survives restarts
+journal  = "/var/lib/gnoracle/journal.jsonl"     # evidence: raw source answers, values, tx hashes
+poll     = "5s"                                  # how often each feed is checked
+dev_tick = false                                 # gnodev only
+
+[gas]
+mode = "estimate"        # simulate, then ask for the measured gas plus margin_bps
+wanted = 60000000        # ceiling (and the fixed amount when mode = "fixed")
+price = "0.001ugnot"     # gnoland-1 minimum; the whole fee is charged, not the gas used
+margin_bps = 2500
+max_deposit = "5000000ugnot"   # storage deposit ceiling per call (refundable when data is pruned)
+
+[notify]                 # alerts: jail, refused values
+telegram_token = ""
+telegram_chat = 0
+
+# One [[feeds]] table per feed this key is registered on. Register first:
+#   gnoracle register <feed> 10000gnot "operator memo"
+
+[[feeds]]
+id = 1
+jitter = "2s"            # wait after the round opens before fetching (spread the sources' load)
+sanity_bps = 2000        # refuse a value more than 20% from our last submission (or the public aggregate)
+min = "0.001"            # absolute bounds in feed units (optional)
+max = "1000"
+override = false         # true submits even when the sanity check fails (still logged and alerted)
+finalize_delay = "5s"    # crank CatchUp this long after a round closes (earns the 1% tip)
+claim_every = "168h"     # ClaimRewards weekly
+claim_min = 1000000      # ...once at least 1 GNOT accrued
+[feeds.source]
+adapter = "http"         # median across urls; at least min_sources must answer
+urls = [
+  "https://api.coinbase.com/v2/prices/ATOM-USD/spot",
+  "https://api.kraken.com/0/public/Ticker?pair=ATOMUSD",
+]
+path = "data.amount"     # JSON path into each body (all urls must share the shape, or run one agent per shape)
+min_sources = 2
+timeout = "8s"
+# headers = { Authorization = "Bearer ${API_TOKEN}" }   # $VARS are expanded
+# scale = "0.01"         # multiply the source value (cents to units)
+
+# A Gnoswap pool TWAP (tick oracle), quoted token1 per token0 in human units:
+# [[feeds]]
+# id = 2
+# [feeds.source]
+# adapter = "gnoswap"
+# pkg_path = "gno.land/r/gnoswap/pool"
+# pool = "gno.land/r/demo/wugnot:gno.land/r/gnoswap/gns:3000"
+# seconds_ago = 1800
+# decimals0 = 6
+# decimals1 = 6
+# invert = false
+
+# A one-off outcome a human confirms: the agent waits until the file exists.
+# [[feeds]]
+# id = 3
+# [feeds.source]
+# adapter = "file"
+# file = "/var/lib/gnoracle/answers/3.txt"   # contains an option label ("Home") or a number
+# map = { H = "Home", D = "Draw", A = "Away" }
+
+# Any script: stdout is the value.
+# [[feeds]]
+# id = 4
+# [feeds.source]
+# adapter = "exec"
+# command = ["/usr/local/bin/fetch-rate", "--pair", "EURUSD"]
+
+# Any realm view returning an integer:
+# [[feeds]]
+# id = 5
+# [feeds.source]
+# adapter = "qeval"
+# pkg_path = "gno.land/r/some/realm"
+# expr = "Price(\"gnot\")"
+# result_decimals = 6
