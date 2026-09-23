@@ -53,4 +53,5 @@ settle_every = "24h"
 finalize_grace = "120s"   # leave the feed's own agents the finaliser tip first
 catch_up_empty = true     # also write off rounds nobody submitted to
 
-# events = [ ... ]    # override the announced event types (see bot.DefaultEvents)
+# events = [ ... ]    # override the announced event types (see bot.DefaultEvents); release events
+#                     # (UpgradeProposed, UpgradeAccepted, ...) come from the proxy package, which the bot watches too

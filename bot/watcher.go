@@ -58,10 +58,13 @@ func (b *Bot) format(ev gnochain.Event) string {
 	var sb strings.Builder
 	realm := "core"
 	switch ev.PkgPath {
+	case b.cfg.Core:
 	case b.cfg.DAO:
 		realm = "dao"
 	case b.cfg.Kourt:
 		realm = "kourt"
+	default:
+		realm = "proxy" // the upgrade package: its events name the implementation path
 	}
 	fmt.Fprintf(&sb, "[%s] %s", realm, ev.String())
 	switch ev.Type {

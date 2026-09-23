@@ -75,8 +75,9 @@ A one-off feed has a single round at its resolve time. Options ("Home",
 "Draw", "Away") are supported as well as numbers, and the same rules apply.
 
 Feeds that run out of subscription money stop paying providers and, after
-enough empty rounds, are retired. The DAO can also update a feed's prices
-and provider limits, retire it, or remove a provider by vote.
+enough empty rounds, are retired. The DAO can also update a feed's prices,
+minimum stake, tolerance and dispute window, retire it, or remove a provider
+by vote.
 
 ## How it stays honest
 

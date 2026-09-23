@@ -6,7 +6,7 @@
 # $GNORACLE_KEY_PASSWORD or password_file; a mnemonic in $GNORACLE_MNEMONIC
 # replaces key_home for containers.
 
-remote   = "https://rpc.gno.land:443"            # gnoland-1; pearl-1: https://rpc.pearl.gno.land:443 (check the current endpoint)
+remote   = "https://rpc.gno.land:443"            # gnoland-1; for pearl-1 use the RPC endpoint the testnet page lists
 chain_id = "gnoland-1"
 core     = "gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/core"
 key_home = "/var/lib/gnoracle/keys"              # a gnokey keybase directory
@@ -34,7 +34,7 @@ telegram_chat = 0
 [[feeds]]
 id = 1
 jitter = "2s"            # wait after the round opens before fetching (spread the sources' load)
-sanity_bps = 2000        # refuse a value more than 20% from our last submission (or the public aggregate)
+sanity_bps = 2000        # refuse a value more than 20% from our last submission (or the public aggregate); -1 disables
 min = "0.001"            # absolute bounds in feed units (optional)
 max = "1000"
 override = false         # true submits even when the sanity check fails (still logged and alerted)

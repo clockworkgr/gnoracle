@@ -40,30 +40,44 @@ make build NS=g1lnk...                     # rewrites clockwork -> NS into build
 make deploy NS=g1lnk... REMOTE=https://rpc.gno.land:443 CHAINID=gnoland-1 KEY=deployer
 ```
 
-`scripts/deploy.sh` publishes the packages in dependency order and skips
+`scripts/deploy.sh` rebuilds `build/`, checks that the keybase holds the
+namespace address, publishes the packages in dependency order and skips
 what is already live, so it is safe to re-run after a failure. Order: the
 pure packages, `core`, `core/impl/v1`, `token`, `dao`, `dao/impl/v1`,
-`dao/exec`, `kourt`, `kourt/impl/v1`. `kourtdev` is only deployed with
-`WITH_KOURTDEV=1` (dev and test chains).
+`dao/exec`, `kourt`. `kourt/impl/v1` binds the stand-in court and ships
+only together with `kourtdev` under `WITH_KOURTDEV=1` (dev and test chains);
+production waits for the release bound to the deployed Kourt (`kourt/impl/v2`,
+M6). `ONLY="r/clockwork/gnoracle/core/impl/v2"` publishes just a new release.
+
+Funding: the permanent `core` realm alone simulates at about 152M gas and
+locks a refundable storage deposit of about 32 GNOT; the whole set needs
+roughly 150 GNOT of deposits plus fees on the deployer key. The keybase:
+`make` exports a repo-local `GNOHOME` for the gno download cache, so the
+scripts look for keys in `${XDG_CONFIG_HOME:-$HOME/.config}/gno` unless
+`GNOKEY_HOME` says otherwise; never create a real key under the repository.
 
 Each implementation realm proposes itself to its permanent realm in `init`.
 Activation is a separate, explicit step by the authority (the guardian key
 until handover, then the DAO):
 
 ```sh
-export GNORACLE_REMOTE=https://rpc.gno.land:443 GNORACLE_CHAIN=gnoland-1 GNORACLE_NS=g1lnk...
+export NS=g1lnk...
+export GNORACLE_REMOTE=https://rpc.gno.land:443 GNORACLE_CHAIN=gnoland-1 GNORACLE_NS=$NS
 export GNORACLE_KEY_HOME=~/.config/gno GNORACLE_KEY=deployer
 gnoracle call gno.land/r/$NS/gnoracle/core Accept gno.land/r/$NS/gnoracle/core/impl/v1
 gnoracle call gno.land/r/$NS/gnoracle/dao Accept gno.land/r/$NS/gnoracle/dao/impl/v1
-gnoracle call gno.land/r/$NS/gnoracle/kourt Accept gno.land/r/$NS/gnoracle/kourt/impl/v1
-gnoracle call gno.land/r/$NS/gnoracle/token TransferMinter <dao address>   # gnoracle status prints it
+gnoracle status                            # prints the DAO's address, live paths, counts, chain time
+gnoracle call gno.land/r/$NS/gnoracle/token TransferMinter <dao address>
 gnoracle call gno.land/r/$NS/gnoracle/core SetParamStr kourtRealm gno.land/r/$NS/gnoracle/kourt
-gnoracle status                            # live paths, counts, chain time
 ```
 
-Then the genesis distribution (plan §8.2: 40% treasury, 25% incentives, 20%
-liquidity, 15% founders with vesting) with `token Transfer`, and the first
-parameter tuning by `SetParam` while the guardian still holds authority.
+The Kourt mirror's release is accepted once one bound to the deployed Kourt
+exists (M6). Then the genesis distribution (plan §9.1: 40% treasury, 25%
+incentives, 20% liquidity, 15% founders) with `token Transfer`, the founders'
+vesting with `dao SetVesting <member> <until> <floor>` (authority) or a
+`vesting` proposal later, and the first parameter tuning by `SetParam` while
+the guardian still holds authority (one change per parameter per block, at
+most ±50% each).
 `scripts/chain-test.sh` drives a whole lifecycle against gnodev and doubles
 as the deployment rehearsal checklist; `make agent-soak` then runs several
 agents and the bot against it and asserts the rounds, rewards and
@@ -72,25 +86,28 @@ suites and publishes the image; the soak needs a chain and stays manual).
 
 ### Authority handover
 
-The guardian is a single key until `guardianHandoverMembers` (25) members
-have staked. Handover is `core TransferAuthorityShared <guardian> <dao path>`
-first (both may act for a period), then `TransferAuthorityToRealms <dao path>`
-(DAO only), and on the DAO `TransferAuthorityToExec` so the DAO can upgrade
-itself through `dao/exec`. Each step emits `AuthorityTransferred`; the bot
-posts them.
+The guardian is a single key until enough members have staked (the plan's
+threshold is `guardianHandoverMembers`, 25; the step itself is manual).
+Handover is `core TransferAuthorityShared <guardian> <dao path>` first (both
+may act for a period), the same on `kourt`, then `TransferAuthorityToRealms
+<dao path>` on both (DAO only; the realms refuse a list without the DAO), and
+on the DAO `TransferAuthorityToExec` so the DAO can upgrade itself through
+`dao/exec`. Each step emits `AuthorityTransferred`; the bot posts them.
+Freezing a realm is refused while a key still holds its authority.
 
 ## 3. Upgrading a realm
 
 1. Deploy the new implementation (`core/impl/v2`, `dao/impl/v2`, `kourt/impl/v2`)
-   with `make deploy`; its `init` proposes it. `gnoracle call <permanent> PendingPaths`
-   or the `:releases` page shows it as pending.
+   with `ONLY="r/clockwork/gnoracle/core/impl/v2" make deploy ...`; its `init`
+   proposes it. The `:releases` page (or `vm/qeval '<permanent>.PendingPaths()'`)
+   shows it as pending.
 2. Rehearse on gnodev first: `make dev`, deploy, `Accept`, run `make chain-test`
    and an agent against it, then `Rollback` and check the state is intact
    (the permanent realm holds all state; an implementation holds none).
 3. Activate: before handover `gnoracle call <permanent> Accept <path>`; after
-   handover a DAO proposal of kind `upgrade-accept` with payload `core <path>`
-   or `dao <path>` (7-day timelock, `upgradeTimelock`), executed with
-   `gnoracle execute <id>`. `ReleaseAccepted` is emitted and posted.
+   handover a DAO proposal of kind `upgrade-accept` with payload `core <path>`,
+   `dao <path>` or `kourt <path>` (7-day timelock, `upgradeTimelock`), executed
+   with `gnoracle execute <id>`. `ReleaseAccepted` is emitted and posted.
 4. Watch `gnoracle health` (both realms' conservation checks must read `ok`)
    and the agents' logs for one full round cycle.
 5. Roll back with `Rollback` (or an `upgrade-rollback` proposal) if anything
@@ -98,10 +115,12 @@ posts them.
 6. `Freeze` ends upgradeability for good. Do not call it before the audit
    closes.
 
-`kourt/impl/v2` is the release that binds the deployed Kourt realm instead
-of `kourtdev`; its acceptance needs the DAO's court founded there first
-(`EnsureCourt`) and court coin bought into the mirror realm's float
-(`Buy` on Kourt, then `TransferCC` to the mirror's address).
+`kourt/impl/v2` (to be written at M6) is the release that binds the deployed
+Kourt realm instead of `kourtdev`; its acceptance needs the DAO's court
+founded there first (`EnsureCourt`) and court coin bought into the mirror
+realm's float (`Buy` on Kourt, then `TransferCC` to the mirror's address).
+Records filed under the stand-in binding cannot be advanced by it; the
+authority closes them with `Abandon` (or a `kourt-abandon` proposal).
 
 ## 4. Running the bot
 
@@ -126,11 +145,12 @@ gnoracle-bot -config bot.toml
   an appeal window), `kourt` (hourly), `settle` (daily, opted-in members).
   Each is idempotent on chain; a lost race costs one small fee.
 - **Docker**: `make docker` locally, or pull `ghcr.io/clockworkgr/gnoracle`
-  (published by CI on every push to `main` and every `v*` tag); run
-  `gnoracle-bot` from the image with the config mounted at
-  `/etc/gnoracle/bot.toml` and the key given as `GNORACLE_MNEMONIC` (a
-  dedicated low-balance key). The image's entrypoint is `gnoracle-agent`;
-  override it with `--entrypoint gnoracle-bot` or `--entrypoint gnoracle`.
+  (published by CI on every push to `main` and every `v*` tag). The image
+  runs as uid 65532 and owns `/var/lib/gnoracle`; a bind mount must be
+  writable by that user. The entrypoint is `gnoracle-agent`, so the bot is
+  `docker run --rm -v $PWD/bot.toml:/etc/gnoracle/bot.toml -v gnoracle-state:/var/lib/gnoracle
+  -e GNORACLE_MNEMONIC=... --entrypoint gnoracle-bot ghcr.io/clockworkgr/gnoracle -config /etc/gnoracle/bot.toml`
+  (a dedicated low-balance key).
 
 ## 5. Running an agent
 
@@ -225,10 +245,12 @@ handover early (§2).
 ## 9. Parameters
 
 `gnoracle params` and `gnoracle params dao` print every parameter with its
-bounds; each change is limited to ±50% per call (`MaxChangeBps`) and, after
-handover, goes through a `param` proposal (`core.name=value` or
-`dao.name=value`; strings as `name=str:value`). Appendix C of the plan lists
-the defaults and why.
+bounds; each change is limited to ±50% per call (`MaxChangeBps`; the bounds
+themselves and one-unit steps are always allowed) and to one change per
+parameter per block, and after handover goes through a `param` proposal
+(`core.<name>=<value>` or `dao.<name>=<value>`; strings as
+`core.<name>=str:<text>`). Appendix C of the plan is generated from the
+registries (`scripts/gen-appendices.py`).
 
 ## 10. Backups and records
 

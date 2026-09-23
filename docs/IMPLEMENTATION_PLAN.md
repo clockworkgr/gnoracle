@@ -116,7 +116,7 @@ Non-goals for v1
 
 | Role | Capital | Earns | Risks |
 |---|---|---|---|
-| Requester | feed deposit (GNOT), first subscription period | a live feed | deposit becomes the first subscription on acceptance; refunded on rejection |
+| Requester | feed deposit (GNOT), first subscription period or bounty | a live feed | deposit and prepayment are escrowed until activation: the deposit is refunded on activation, the prepayment becomes the first period or the bounty; both are refunded on rejection (spam forfeits the deposit only) |
 | Sponsor | monthly subscription per feed (shared) | fresh-tier access for named consumer realms | none beyond the fee |
 | Provider | GNOT stake per feed | share of the feed's round pool, alerter and cranker tips | miss penalties, jail, minor (5%) or major (100%) slash after a lost dispute |
 | Consumer realm | prepaid GNOT credits | data | none beyond fees |
@@ -196,11 +196,13 @@ deploy of the same source under the same address).
   paying PYTH through `token`'s tellers, and the balance tables live in the
   permanent realm and are not upgradeable. Implementations request movements
   through `StateRef`; they never see a banker or a `cur`.
-- **Proxy and authority.** `proxy = upgradeable.New(upgradeable.NewAnyOf(
-  upgradeable.NewAddrAuthority(guardian), upgradeable.NewRealmAuthority(daoPath)))`
-  at bootstrap. Implementation realms are nested (`core/impl/v1`), so the
+- **Proxy and authority.** `proxy = upgradeable.New(upgradeable.NewAddrAuthority(guardian))`
+  at bootstrap on `core` and `kourt`; `TransferAuthorityShared(guardian, daoPath)`
+  widens it to `AnyOf(guardian, dao)` for the handover overlap and
+  `TransferAuthorityToRealms(daoPath)` leaves the DAO alone. The DAO's own
+  proxy starts as `AnyOf(guardian, exec)`. Implementation realms are nested (`core/impl/v1`), so the
   default `New` (nested only) applies. An implementation registers itself in
-  its `init`: `core.Register(cross(cur), &implV1{})`, which calls
+  its `init`: `core.RegisterImpl(cross(cur), &implV1{})`, which calls
   `proxy.Propose`. Acceptance is `core.Accept(cross(cur), path)` executed by a
   DAO proposal (`upgrade-accept`, 66%, 7-day timelock) or, during bootstrap,
   by the guardian. `Rollback` reverts to the previous release (`upgrade-
@@ -344,19 +346,23 @@ Proposed ──DAO accept──► Active ──pool empty for a period──►
   `trustedRequesters` list (set by `trusted-requester` proposals) activates
   immediately without a vote when its bounty is at least `oneOffBountyFloor`
   and the requester's declared value at stake is under `trustedOneOffCap`
-  (default 50,000 GNOT); the DAO can still `feed-deprecate` it, and a
-  requester whose feeds are deprecated twice is removed from the list. This
-  is the path gnomarket markets use (§6.3).
-- Reject or no quorum after the voting period: deposit and prepayment
-  refunded minus the proposal's storage cost. The DAO may instead mark a
-  proposal spam, in which case the deposit goes to the treasury.
+  (default 50,000 GNOT); the DAO can still `feed-deprecate` it and remove
+  the requester from the list by a `trusted-requester` proposal with cap 0.
+  This is the path gnomarket markets use (§6.3).
+- Reject: a `feed-deprecate` proposal on the proposed feed refunds the
+  deposit and the escrowed prepayment (as credit when the requester is a
+  realm); with the reason `spam` the deposit goes to the fee pool and the
+  prepayment still returns.
 - Unfunded: when the subscription pool cannot cover the next period,
   providers keep submitting if they want (rounds still aggregate) but miss
   penalties stop, and the status reported to consumers carries `unfunded`.
   Any sponsor payment reactivates it.
-- Deprecate: by proposal, or automatically when a one-off feed's round is
-  final, or when a recurring feed has had no eligible submissions for
-  `deadFeedRounds` (default 168) and anyone calls `PruneFeed`.
+- Deprecate: by proposal, or automatically when a recurring feed has had no
+  eligible submissions for `deadFeedRounds` (default 168). Deprecation
+  refunds a one-off's undistributed bounty to the requester, sweeps a
+  recurring pool to the fee pool and starts unbonding for every seated
+  provider. A one-off whose round produced nothing may be reopened by the
+  requester (`ReopenOneOff`) instead.
 - Prune: after `retentionAfterDeprecate` (default 90 d) anyone may delete
   rounds and then the feed; the storage refund goes to the caller.
 
@@ -415,9 +421,12 @@ Submitters and eligibility are bitmasks over the active set's slot index. A
 slot is retired when its provider leaves and reused only after every round
 referencing it is pruned (slot generation counter).
 
-Per hourly feed with 9 providers, steady-state growth is about 7.6 kB per day
-(0.76 GNOT of deposit across all submitters), refunded on prune. Retention:
-`roundRetention` 30 d after finality and at least 64 rounds.
+Per hourly feed, a round record measures about 1.8 to 1.9 kB on v1.2.0
+(packed values and slots), so steady-state growth is about 44 kB per day
+(4.6 GNOT of deposit across all submitters), refunded on prune. Retention:
+`roundRetention` 30 d after finality, at least `minRoundsKept` (64) rounds,
+never a round inside its dispute window or under an unresolved dispute; a
+retired feed past `retentionAfterDeprecate` keeps nothing.
 
 ---
 
@@ -482,11 +491,10 @@ the alerter is the liveness mechanism, so the share is half and the trigger
 is one missed round. The 5% per epoch cap keeps a provider whose upstream
 died over a weekend from losing more than an honest error should cost.
 
-Rewards are claimed with `ClaimRewards(cur, feedID, maxRounds)`, which walks
-the provider's rounds from `rewardCursor` (bounded by `maxRounds`, default
-50). Rounds older than `roundRetention` whose rewards were never claimed
-forfeit them to the treasury on prune, which is what lets pruning be
-permissionless.
+Rewards accrue to the provider's record at finalisation and are paid by
+`ClaimRewards(cur, feedID)`. Rewards still unclaimed when a retired feed is
+pruned (after `retentionAfterDeprecate`) forfeit to the fee pool, which is
+what lets pruning be permissionless.
 
 ### 5.3 Value at risk shown to consumers
 
@@ -532,10 +540,13 @@ has demonstrably reached sustainability (Chainlink feeds on BNB and Polygon,
 Pyth Network Pro; RESEARCH §3.2). Metered reads are secondary.
 
 - `Sponsor(cur, feedID, periods)`: `-send` `subscriptionPrice x periods`
-  (default 1,000 GNOT per 30 d per feed, about $62). Several sponsors may
-  pay for the same feed; each period's cost is split evenly among that
-  period's sponsors and the surplus rolls forward. A sponsor names up to 8
-  consumer realm addresses whose metered reads on that feed are free.
+  (default 1,000 GNOT per 30 d per feed, about $62), 1 to 12 periods at a
+  time. Several sponsors may pay for the same feed; each payment extends
+  `paidUntil` and adds its provider share to the pool (the drip per round is
+  fixed at activation from `subscriptionPrice`, so more money lasts longer
+  rather than paying more per round). A sponsor names up to 8 consumer
+  realm addresses whose metered reads on that feed are free; a consumer
+  keeps whichever sponsorship covers it longest.
 - `DepositFor(cur, consumer address)`: `-send` ugnot credits a consumer realm
   for metered reads (a realm cannot attach `-send` to its own calls; the
   call-scoped `CallSend` RFC of 2026-09-19 would change that and is tracked).
@@ -556,7 +567,7 @@ is a one-off categorical feed (`options` = the market outcomes plus
 `Invalid`), `resolveAfter` becomes `resolveAt`, the market creator pays the
 bounty, the market realm is on the `trustedRequesters` list so the feed
 activates without a vote while under `trustedOneOffCap`, and the market realm
-calls `ReadOption` once the tier is `final`. The gnomarket dispute path is replaced by this DAO's; its
+calls `Read` once the tier is `final` (a categorical value is the option index). The gnomarket dispute path is replaced by this DAO's; its
 "TOO_EARLY" case becomes a `VOID` outcome followed by `ReopenOneOff`.
 
 ---
@@ -594,8 +605,9 @@ disputer asked for `major`), `VOID` (the round cannot be resolved as
 specified: ambiguous spec, source unavailable, too early), `ABSTAIN`.
 
 - Commit phase `commitPeriod` (default 24 h): `CommitVote(cur, disputeID,
-  commitment)` with `commitment = hex(sha256(disputeID || choice || salt ||
-  voter))`. Recommitting overwrites.
+  commitment)` with `commitment = hex(sha256("gnoracle|dispute|" || disputeID
+  || "|" || ballotRound || "|" || choice || "|" || salt || "|" || voter))`.
+  Recommitting overwrites (the CLI keeps a fresh salt for a changed choice).
 - Reveal phase `revealPeriod` (default 24 h): `RevealVote(cur, disputeID,
   choice, salt)`. UMA's 24 h + 24 h reaches about 92% participation with
   slashing; Aragon uses 2 d + 2 d.
@@ -642,9 +654,10 @@ Appeal and round 2
 
 Effects
 
-- `UPHOLD`: bond forfeited: 50% to the round's eligible providers (equal
-  shares), 30% to coherent voters, 20% to the treasury. The round returns to
-  its prior tier and its dispute window restarts from resolution.
+- `UPHOLD`: bond forfeited: 50% to the feed's next round pool (the
+  providers of the next finalised round), 30% to coherent voters, 20% to the
+  treasury. The round returns to its prior tier and its dispute window
+  restarts from resolution; a new dispute may be opened in that window.
 - `OVERTURN`: the round value becomes `proposedValue`, tier `final`
   (`overturned` in the round record). Providers whose submission lies outside
   `toleranceBps` of the new value are slashed at the decided tier; a major
@@ -666,8 +679,11 @@ Effects
 Every resolved dispute (including `VOID`) is mirrored as a claim in the DAO's
 own Kourt court through the `kourt` permanent realm and its live
 implementation, which is compiled against one Kourt realm path. The record
-is advanced by `KourtCrank(cur, disputeID)`; `core` calls it once on
-resolution, crankers and the notifier bot call it later.
+is advanced by `Crank(cur, disputeID)` on the mirror realm, one step per
+call; the bot and any cranker call it, `core` does not (the mirror imports
+the core, not the other way round). Each record remembers the Kourt binding
+it was filed under; a release bound to another Kourt refuses to touch it and
+the authority can `Abandon` it.
 
 ```
 Pending ──OpenClaimP (CC deposit + fee)──► Filed ──Stake(verdict side)──► Staked
@@ -719,9 +735,11 @@ Pending ──OpenClaimP (CC deposit + fee)──► Filed ──Stake(verdict s
   `TransferFrom`, `Render`. Mint and burn are `ownable` by the `dao`
   permanent realm; `dao` mints only by executed proposal, capped by
   `maxSupply` and `maxMintPerYearBps`.
-- Decided: name `Pythia`, symbol `PYTH`, 6 decimals, fixed max supply
-  100,000,000 PYTH, allocation as in §9.1. No automatic emission. Rewards to
-  stakers are GNOT fees and forfeitures, not new tokens. `PYTH` is also the
+- Decided: name `Pythia`, symbol `PYTH`, 6 decimals, 100,000,000 PYTH at
+  genesis with a hard cap of 120,000,000 that only `mint` proposals may
+  approach (at most `maxMintPerYearBps`, 2% a year), allocation as in §9.1.
+  No automatic emission. Rewards to stakers are GNOT fees and forfeitures,
+  not new tokens. `PYTH` is also the
   ticker of Pyth Network's token on Solana; gno.land keys tokens by realm path
   plus symbol (`.../gnoracle/token.PYTH`), so there is no on-chain collision,
   and these documents say "Pyth Network" whenever they mean that project.
@@ -744,7 +762,10 @@ Pending ──OpenClaimP (CC deposit + fee)──► Filed ──Stake(verdict s
   member to `SettleMember` first.
 - Before any stake change or vote, `settleMember(addr, maxN)` runs (§8.4);
   beyond `settleMaxN` (20) pending disputes the call refuses and the member
-  (or anyone, for a `settleTipBps` 50 tip) calls `SettleMember` explicitly.
+  (or anyone; `settleTipBps` is reserved, no tip is paid in v1) calls
+  `SettleMember` explicitly. A ballot that is still running or not yet funded
+  by the core does not block stake changes; withdrawal waits for ballots the
+  member holds weight in.
 - Founding allocations carry `vestedUntil`; unstaking below the vested floor
   is refused (there is no vesting package on gno.land).
 
@@ -759,7 +780,7 @@ Kinds, each a string payload parsed by the kind, so any wallet can propose:
 | `feed-deprecate` | feedID + reason | 15% / >50% / 3 d | core.DeprecateFeed |
 | `provider-remove` | feedID + addr + reason | 20% / >50% / 3 d | core.ForceUnbond |
 | `trusted-requester` | add or remove realm path, cap | 20% / >50% / 5 d | core.SetTrustedRequester |
-| `param` | name=value | 20% / >50% / 5 d + 7 d timelock for economic params (stake floors, slash rates, windows, splits), 2 d for operational ones; at most ±50% per change; hard floors (dispute window ≥ 2 h, per-voter cap ≤ 33%, stake floor ≥ 1,000 GNOT) | params.Set |
+| `param` | name=value | 20% / >50% / 5 d + 2 d timelock; at most ±50% per change and once per block; hard floors (dispute window ≥ 2 h, per-voter cap ≤ 33%, stake floor ≥ 1,000 GNOT) | params.Set |
 | `treasury` | denom, amount, to, memo | 20% / >66% / 5 d + 2 d timelock | treasury.Send |
 | `subsidy` | feedID, budget, months | 20% / >50% / 5 d | core.SetSubsidy |
 | `mint` | amount, to | 25% / >66% / 7 d + 7 d timelock | token mint (capped) |
@@ -839,146 +860,20 @@ window's fee share to the treasury (§9.4).
 
 ### 8.6 Treasury and guardian
 
-- `p/nt/treasury/v0` with a coins banker on the DAO's `cur.Sub("treasury")`
-  sub-account and a GRC20 banker for PYTH. Spends only by proposal. Standing
+- The treasury is the DAO realm's own balance beyond what it owes (stakes,
+  unbonding, rewards, fee shares, deposits): `TreasuryUgnot()` and
+  `TreasuryPyth()` are derived, not separate accounts. Spends only by proposal. Standing
   programmes by proposal: voter gas rebates (UMA's Risk Labs pays about
   $45k/month of these), watcher bounties, bootstrap subsidies.
-- Guardian: decided as a single key (the deployer's) until handover, with
-  three powers: `Pause` (stops new stakes, registrations, submissions,
-  sponsorships and metered reads; never withdrawals, unbonding, claims or
-  dispute resolution), `Accept`/`Rollback` on the three proxies during
-  bootstrap, and nothing else. The trust statement in the docs says so
-  plainly: until handover one key can pause inflows and switch releases. The
+- Guardian: decided as a single key (the deployer's) until handover. Its
+  powers are those of the proxy authority: activate, update and deprecate
+  feeds, set parameters (at most ±50% per change and once per block), eject
+  providers, accept or roll back releases, and hand the authority over.
+  There is no pause: a mistaken release is rolled back, not paused. The
+  realms refuse a realm-only authority that leaves the DAO out, and refuse
+  to freeze while a key still holds the authority. The trust statement in
+  the docs says so plainly: until handover one key governs the realms. The
   DAO executes `authority-transfer` to `NewRealmAuthority(daoPath)` on all
-  three realms once at least `guardianHandoverMembers` (25) members are
-  staked; after that the guardian keeps only `Pause`, and a later proposal can
-  drop that too. The `authz` member authority makes widening to 2-of-3 later
-  a one-line change if collaborators join.
-
----
-
-## 9. Tokenomics
-
-### 9.1 Supply and distribution (decided)
-
-| Bucket | Share | Release |
-|---|---|---|
-| DAO treasury reserve | 40% | held; spent by proposal |
-| Provider and member incentives | 25% | released by `subsidy` and `treasury` proposals against published programmes, tied to feeds with paying sponsors |
-| Gnoswap liquidity and LP incentives | 20% | paired with GNOT by proposal |
-| Founding contributors | 15% | staked at genesis, 12-month cliff then linear over 36 months via `vestedUntil` |
-
-Fixed supply, no automatic inflation. `mint` proposals are capped at
-`maxMintPerYearBps` (200, 2%) of supply for a future bounded emission if the
-DAO ever wants one.
-
-### 9.2 Value flows
-
-```
-subscription (per feed, per 30 d) ─┬─ 70% ─► feed round pools over the period ─► eligible providers, 1% cranker
-                                   ├─ 15% ─► DAO staker accumulator (ugnot)
-                                   └─ 15% ─► treasury
-metered read fee ────────────────── same 70 / 15 / 15
-one-off bounty ────────────────── 100% ─► that feed's round pool
-provider miss slash ──────────────┬─ 50% ─► alerter
-                                  └─ 50% ─► feed's next round pool
-lost-dispute slash (5% or 100%) ─┬─ 50% ─► disputer
-                                  ├─ 30% ─► coherent voters (ugnot, pro rata)
-                                  └─ 20% ─► treasury
-failed dispute bond ─────────────┬─ 50% ─► eligible providers of the round
-                                  ├─ 30% ─► coherent voters
-                                  └─ 20% ─► treasury
-void dispute ─────────────────── 5% of bond: 2.5% voters who revealed, 2.5% treasury; 95% returned
-lost appeal ──────────────────── 25% of appeal bond: half round-2 coherent voters, half treasury
-voter absence / abstain / incoherence ─ 100% ─► coherent voters of that dispute (PYTH)
-spam feed deposit ─────────────── 100% ─► treasury
-bootstrap subsidy ─────────────── treasury ─► round pools of sponsored feeds, decaying 10%/month, 12 months
-```
-
-Voting penalties are zero-sum among members; the treasury takes none of
-them, so nobody inside the DAO profits from manufacturing disputes except
-through the 20% treasury share of forfeitures, which needs a real loser.
-
-### 9.3 Sanity checks (GNOT at $0.062)
-
-Provider economics on an hourly price feed with 5 providers at 25,000 GNOT
-each ($1,550), one sponsor at 1,000 GNOT per 30 d, and 10 metered reads per
-hour at 0.02 GNOT:
-
-| Item | Per day | Per provider per day |
-|---|---|---|
-| subscription to pool (70% of 33.3 GNOT) | 23.3 GNOT | 4.67 GNOT |
-| metered reads to pool (70% of 4.8 GNOT) | 3.36 GNOT | 0.67 GNOT |
-| gas for 24 submissions and a share of finalisations (measured about 17M gas each at 1 ugnot per 1000 gas) | | about 0.5 GNOT |
-| storage deposit locked, refundable on prune | | about 0.6 GNOT rolling |
-| net | | about 4.8 GNOT/day, about 7% annualised on 25,000 GNOT |
-
-That yield is thin, which is the honest state of oracle economics in 2026:
-Pyth Network's on-chain fees earned about $115K in a half-year across 70 chains. Two
-sponsors or a subsidy double it; the acceptance checklist requires
-`(subscription pool per period x 70% / rounds per period) >= 3 x minProviders
-x 0.5 GNOT / rounds per day` or an approved subsidy, and the feed page shows realised provider
-APR so the market can price stake.
-
-Attack cost on that feed: corrupting the equal-weight median needs 3 of 5
-providers, so 75,000 GNOT ($4,650) at risk of a major slash against a 12,500
-GNOT bond (10% of 125,000) that any watcher can post and that returns 37,500
-GNOT if the dispute succeeds. `maxValueAtRisk` published for the feed is
-about 37,500 GNOT ($2,300): consumers moving more than that on a single
-provisional read are told to wait for `final` or ask for a higher-stake feed.
-The absolute numbers are small because GNOT is; the USD targets in the
-parameter table rise with the DAO's own GNOT/USD feed (v1.1, 24 h lagged,
-bounded ±25% per epoch, Tellor's rule).
-
-Voter economics: a member with 1% of staked PYTH, 4 disputes a month, coherent
-every time, earns 1% of the month's voter share of forfeitures plus 1% of 15%
-of all fees. Absent every time, they lose 2% of stake a month, capped at 5%;
-abstaining every time costs 0.2%. A member who never shows up is out in about
-three years, slower than UMA (where absence and emissions roughly cancel) and
-faster than Kourt (where absence costs nothing).
-
-### 9.4 Regulatory note (not legal advice)
-
-Kourt's authors chose "principal always returns, nothing is risked upon the
-outcome, rewards are minted for work" to keep the coin a participation
-instrument. PYTH as planned differs on two points: stakers receive a share of
-protocol fees, and stakers can lose stake for not working. The second
-strengthens the "paid for work" framing; the first is the one to discuss
-with counsel before mainnet. Two levers are already parameters:
-`stakerFeeShareBps` can be 0 (fees go to providers and the treasury only),
-and `workGate` conditions the fee share on having voted in the period.
-
----
-
-## 10. Security analysis
-
-### 10.1 Threat table
-
-| Threat | Mitigation |
-|---|---|
-| Provider collusion above the median threshold | bonded disputes decided by a separate voter set; published `maxValueAtRisk`; `provider-remove`; feed specs may require 5+ providers and higher stake; require providers to declare at least three distinct upstream sources in their registration memo (API3 and Chainlink's layered aggregation are the references) |
-| Copycat providers | equal split gives no gain from copying; the copied value is as slashable as the original; v1.1 optional per-feed commit-reveal submissions |
-| Sybil providers filling `maxProviders` | `providerMinStake` x 15 slots is the price (375,000 GNOT at the recommended price-feed stake); DAO removal by proposal |
-| Stake too small for the value secured (BonqDAO) | USD-targeted floors with a GNOT minimum; per-feed `maxValueAtRisk`; 100% tier plus ejection; quarantine band so one round cannot print an absurd value into the consensus tier; parameter timelock so floors cannot be quietly lowered |
-| Lazy voters copying visible votes | commit-reveal; cheap explicit abstain |
-| Vote buying after a dispute is visible | weight sealed at the previous epoch; `min(snapshot, live)`; new stake activates next epoch; unstake cooldown longer than a dispute |
-| Whale capture of a dispute vote (UMA 2025) | 20% per-address cap; 60% / 55% supermajorities with void fallback; appeal round; quarantined value so a captured vote can freeze but not inject |
-| p + epsilon bribery of voters | slashable stake far above voter rewards; permanent public dissent in the Kourt mirror; appeal; the DAO can raise `incoherenceSlashBps` temporarily |
-| Dispute spam to grief providers or force votes | bond of 10% of feed stake, min 2,500 GNOT, doubling within 7 d; failed disputes pay providers and voters; void consumes 5% |
-| Censorship by dispute (Liquity/Tellor 2022) | disputed values are quarantined, not deleted; the last final value keeps serving; bond doubling per open dispute |
-| Manufactured disputes to farm voter rewards | penalties are zero-sum among members; forfeitures need a real loser; disputer share dominates voter share |
-| Storage-deposit griefing | every writable path costs the writer a deposit or a bond; strangers cannot create per-member state |
-| Unbounded loops | active set at most 15; one round per `Finalize`; catch-up capped; member settle capped; pagers in Render; filetest `// Gas:` pins |
-| Cross-realm panic griefing | consumer read path calls only `core`; Kourt calls only from the adapter crank, failures recorded not propagated; token calls only to `token` and `wugnot` |
-| Reentrancy through token callbacks | GRC20 has no hooks; checks-effects-interactions everywhere; `executing` guard on the DAO as in Kourt's governor |
-| Spoofed realm values | `cur.IsCurrent()` before `cur.Previous()`; payments only under `IsUserCall()`; `grc20.IsCanonicalTeller` on any teller received; the upgradeable store re-checks `IsCurrent()` on every access |
-| Malicious or buggy implementation release | gated store with conservation checks in permanent code; DAO-only `Accept` with 7-day timelock and a public pending list; one-transaction `Rollback`; `Freeze`; `Health()` before and after |
-| Guardian abuse | guardian can pause inflows and accept or roll back releases only until handover; withdrawals and settlements are unpausable; every action emits an event |
-| Integer overflow | `math/overflow` everywhere; 128-bit products via `bits.Mul64`/`Div64`; feed values validated against `decimals`; accumulators scaled 1e12 with headroom tests |
-| Front-running submissions inside a block | validators order transactions; values are public anyway; equal split; tolerance band |
-
-### 10.2 Invariants (asserted in tests and by the permanent `Health()` view)
-
 - `core` ugnot balance ≥ Σ provider stakes (active + unbonding) + Σ credits +
   Σ subscription pools + Σ open dispute and appeal bonds + Σ unclaimed round
   pools + Σ unclaimed provider rewards + fees not yet forwarded.
@@ -1123,9 +1018,9 @@ chain.
 ### 12.3 gnoweb pages (`Render`)
 
 `core`: `:feeds`, `:feed/<id>` (spec, providers, `maxValueAtRisk`, delayed
-values, sponsor and register forms), `:feed/<id>/rounds`, `:disputes`,
+values), `:feed/<id>/rounds`, `:disputes`,
 `:dispute/<id>` (tallies once resolved, evidence hash, Kourt link with the
-attribution badge), `:providers/<addr>`, `:consumers/<addr>`, `:releases`
+attribution badge), `:provider/<feed>/<addr>`, `:consumer/<addr>`, `:releases`
 (live, pending, history). `dao`: `:members`, `:member/<addr>` (stake, pending
 obligations, penalties in window), `:proposals`, `:proposal/<id>`, `:params`,
 `:treasury`, `:releases`. Lists paged with `p/nt/bptree/pager/v0`; all user
@@ -1138,11 +1033,11 @@ text through `sanitize.InlineText`.
 | Layer | What | Tooling |
 |---|---|---|
 | Pure packages | median and majority edge cases, tier assignment at the boundaries, round arithmetic across long gaps, accumulator rounding (dust never leaks to users), checkpoints across epochs, commit hash round-trips, tally with clipping and both decision thresholds, penalty caps | `gno test`, table tests, seeded property loops |
-| Realm flows | one narrative test per story: feed proposed to final; provider misses to jail to unjail; dispute upheld; overturn at minor tier; overturn downgraded from major to minor; void; failed quorum rolls to round 2; appeal reverses round 1; member absent then settled; unstake blocked by pending obligations; sponsor lapses to unfunded; Kourt crank through every state against a fake Kourt realm | `_test.gno` with `testing.SetRealm`, `SkipHeights`, `IssueCoins`, `SetOriginSend`; `r/tests/fakekourt` |
+| Realm flows | one narrative test per story: feed proposed to final; provider misses to jail to unjail; dispute upheld; overturn at minor tier; overturn downgraded from major to minor; void; failed quorum rolls to round 2; appeal reverses round 1; member absent then settled; unstake blocked by pending obligations; sponsor lapses to unfunded; Kourt crank through every state against a fake Kourt realm | `_test.gno` with `testing.SetRealm`, `SkipHeights`, `IssueCoins`, `SetOriginSend`; `r/clockwork/gnoracle/kourtdev` (the stand-in Kourt) |
 | Upgrade | register `impl/v2`, accept through a DAO proposal, verify state untouched and `Health()` unchanged, roll back, verify the old release's `StateRef` is dead (`IsCurrent()` fails), freeze and verify `Accept` refuses | realm tests plus a filetest per proxy |
 | Filetests | events for every entry point; `// Storage:` and `// Gas:` pins for §11 | `*_filetest.gno`, golden files updated only with a reviewed diff |
 | Adversarial | stale `cur`, `maketx run` payments refused, non-canonical teller refused, reentrant proposal execution refused, a panicking Kourt callee does not block resolution, oversized spec and evidence refused, overflow attempts, an implementation trying to keep a `StateRef` across calls, an implementation calling a mutator that would break conservation | `adversarial_test.gno` per realm |
-| Economic simulation | 1000 rounds with honest, flaky, colluding and copycat providers and lazy, coherent, abstaining and bribed voters; asserts honest providers profit, colluders lose, the penalty cap binds; sweeps the parameter table | `sim/` in Go, results in `docs/SIMULATION.md` |
+| Economic simulation | `docs/SIMULATION.md` (`go run ./sim`): deterministic break-even tables for provider gas by cadence, subscription prices, fee routing, miss penalties, voter exposure and dispute bonds; the stochastic run with honest, flaky, colluding and copycat providers and lazy, coherent, abstaining and bribed voters moves to the pearl-1 soak; sweeps the parameter table | `sim/` in Go, results in `docs/SIMULATION.md` |
 | Integration | gnodev with three agents, one consumer realm, the bot in dry-run; a dispute end to end with the Kourt mirror against a local copy of `r/kourtv3` | `make chain-test` |
 | Testnet soak | 4 weeks on `pearl-1` with at least 5 external providers, 2 feeds, at least 3 real disputes including one appeal, one live upgrade and one rollback | `docs/OPERATIONS.md` runbook |
 | Review | external audit of the permanent realms, `impl/v1` and `p/ledger`; a mutation run like Kourt's on the money paths | before mainnet |
@@ -1161,7 +1056,7 @@ parallel by a second person from M3.
 | M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **done 2026-09-23**: realms and realm tests, `make chain-test` lifecycle on gnodev, the `impl/v2` accept-and-rollback rehearsal in `upgrade_test.gno`, and the multi-agent soak (`make agent-soak`, five-minute runs; the 48 h soak is part of the M6 testnet criteria) |
 | M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
 | M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages). Binding `kourt/impl/v2` to a deployed Kourt and the notifier bot's cranking move to M5/M6 |
-| M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`); `make agent-soak` integration scenario; container image and CI publishing to ghcr.io. Open: the acceptance run by two outside testers from the docs alone |
+| M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | **built 2026-09-23**: `gnoracle-agent` (five adapters: http, gnoswap, qeval, exec, file; sanity bounds; journal), `gnoracle-bot` (RPC event scanner, Telegram reminders, four cranks), `gnoracle` CLI (views, every transaction, commit-reveal salts), `:json` machine views on the three realms, `scripts/deploy.sh`, Dockerfile, `docs/OPERATIONS.md` and five role guides; soaked on gnodev with two agents and the bot; `docs/SIMULATION.md` (break-even tables from `go run ./sim`); `make agent-soak` integration scenario; container image and CI publishing to ghcr.io. Open: the acceptance run by two outside testers from the docs alone; **reviewed 2026-09-23**: eight-area code and documentation review, findings and fixes in `docs/REVIEW.md` |
 | M6 | Testnet | deploy to `pearl-1`, found the court on the pearl-1 Kourt realm (`gno.land/r/g13khfsjnnq6g3lz2e997jejc9kvlz2x5yx08dr0/kourt2`, generation to confirm), soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback | soak criteria in §13 met | 5 wk |
 | M7 | Audit and mainnet | external audit, fixes, mutation run, mainnet `addpkg` approvals, PYTH genesis distribution, Gnoswap pool, first feeds (gnomarket outcomes, GNOT/USD), guardian handover scheduled | audit findings closed; at least 25 stakers | 6 wk + audit lead time |
 
@@ -1210,7 +1105,7 @@ Resolved with the owner on 2026-09-23:
 | Kourt target | v3 realm `gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3` first; v2 adapter if kourt.xyz stays on v2; confirm with Jae Kwon before M4 | §7.4 |
 | gnomarket requests | allowlisted trusted requesters activate one-off feeds without a vote under `trustedOneOffCap` | §4.2, §6.3, §8.3 |
 | Guardian | single key (the deployer's) until handover at 25 staked members | §8.6 |
-| Token | `Pythia` / `PYTH`, 6 decimals, 100,000,000 fixed, 40% treasury / 25% incentives / 20% liquidity / 15% founders (12 m cliff, 36 m vest) | §8.1, §9.1 |
+| Token | `Pythia` / `PYTH`, 6 decimals, 100,000,000 at genesis, 120,000,000 hard cap (mint by vote, 2%/yr), 40% treasury / 25% incentives / 20% liquidity / 15% founders (12 m cliff, 36 m vest via `SetVesting` or a `vesting` proposal) | §8.1, §9.1 |
 
 Still open (needed before M3):
 
@@ -1219,186 +1114,381 @@ Still open (needed before M3):
 
 ---
 
-## Appendix A. Public API sketch
+## Appendix A. Public API (generated from the sources)
 
-Crossing functions are `func F(cur realm, ...)` on the permanent realm and
-forward to the live implementation's `(_ int, rlm realm, ...)` method; view
-functions are plain.
+Generated by `scripts/gen-appendices.py`; edit the realms, not this section. Crossing functions take `cur realm` and are called with `cross(cur)`; the others are free views (`vm/qeval`). The behaviour behind each entry point lives in the live implementation realm.
+
+### `gno.land/r/clockwork/gnoracle/core`
 
 ```go
-// gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/core (permanent)
-// consumers and sponsors
-func Read(cur realm, feedID uint64) (value int64, decimals int, roundID uint64, updatedAt int64, tier string)
-func ReadOption(cur realm, feedID uint64) (option int, label string, roundID uint64, updatedAt int64, tier string)
-func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
-func DepositFor(cur realm, consumer address)                         // -send
-func WithdrawCredit(cur realm, amount int64)
-func SetFinalOnly(cur realm, on bool)
-func Sponsor(cur realm, feedID uint64, periods int, consumers string) // -send; consumers: comma-separated addresses
-// feeds
-func ProposeFeed(cur realm, specJSON string) uint64                  // -send: feedDeposit + first period or bounty
-func FundBounty(cur realm, feedID uint64)                             // -send (one-off)
+func ProposeFeed(cur realm, specJSON string) uint64
+func ActivateFeed(cur realm, feedID uint64)
+func DeprecateFeed(cur realm, feedID uint64, reason string)
+func UpdateFeed(cur realm, feedID uint64, changesJSON string)
+func Sponsor(cur realm, feedID uint64, periods int64, consumersCSV string)
+func FundBounty(cur realm, feedID uint64)
 func Finalize(cur realm, feedID, roundID uint64)
-func CatchUp(cur realm, feedID uint64, maxRounds int) int
-func PruneRounds(cur realm, feedID uint64, maxRounds int) int
+func CatchUp(cur realm, feedID uint64, maxRounds int64) int64
+func PruneRounds(cur realm, feedID uint64, maxRounds int64) int64
 func PruneFeed(cur realm, feedID uint64)
 func ReopenOneOff(cur realm, feedID uint64, resolveAt int64)
-// providers
-func Register(cur realm, feedID uint64, sourcesMemo string)          // -send: >= providerMinStake
-func TopUp(cur realm, feedID uint64)                                  // -send
+func Register(cur realm, feedID uint64, memo string)
+func TopUp(cur realm, feedID uint64)
 func Submit(cur realm, feedID, roundID uint64, value int64)
 func RequestUnbond(cur realm, feedID uint64)
 func Withdraw(cur realm, feedID uint64) int64
 func Unjail(cur realm, feedID uint64)
-func ClaimRewards(cur realm, feedID uint64, maxRounds int) int64
-// disputes
-func Dispute(cur realm, feedID, roundID uint64, proposedValue int64, tier, evidence string) uint64 // -send: bond; tier minor|major
-func Appeal(cur realm, disputeID uint64)                              // -send: 2x bond, inside appealWindow after a round-1 decision
-func ResolveDispute(cur realm, disputeID uint64)                      // reads round 1, waits out the appeal window, reads round 2, applies
-// governance hooks (dao only)
-func ActivateFeed(cur realm, feedID uint64)
-func UpdateFeed(cur realm, feedID uint64, changesJSON string)
-func DeprecateFeed(cur realm, feedID uint64, reason string)
+func ClaimRewards(cur realm, feedID uint64) int64
 func ForceUnbond(cur realm, feedID uint64, provider address)
-func SetSubsidy(cur realm, feedID uint64, budget int64, months int)
-func SetTrustedRequester(cur realm, path string, allowed bool, cap int64)
-func SetKourtAdapter(cur realm, path string)
-// upgradeable proxy
-func Register(cur realm, impl Core)      // called by an implementation realm's init
-func Accept(cur realm, pkgPath string)   // dao (proposal) or guardian during bootstrap
+func DepositFor(cur realm, consumer address)
+func WithdrawCredit(cur realm, amount int64)
+func SetFinalOnly(cur realm, on bool)
+func Read(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string)
+func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
+func Dispute(cur realm, feedID, roundID uint64, proposedValue int64, tier, evidence string) uint64
+func Appeal(cur realm, disputeID uint64)
+func ResolveDispute(cur realm, disputeID uint64)
+func SetParam(cur realm, name string, value int64)
+func SetTrustedRequester(cur realm, pkgPath string, cap int64)
+func RegisterImpl(cur realm, impl Core)
+func Accept(cur realm, pkgPath string)
+func WithdrawImpl(cur realm, pkgPath string)
 func Rollback(cur realm)
+func Forget(cur realm)
 func Freeze(cur realm)
-func TransferAuthority(cur realm, spec string)
-func Store(_ int, rlm realm) *StateRef   // gated; implementations and extensions only
-func LiveImpl() any
-// views
-func FeedInfo(feedID uint64) string
-func RoundInfo(feedID, roundID uint64) string
-func ProviderInfo(feedID uint64, addr address) string
-func DisputeInfo(disputeID uint64) string
-func Releases() string
-func Health() string
-func Render(path string) string
+func AddExtension(cur realm, pkgPath string)
+func DropExtension(cur realm, pkgPath string)
+func TransferAuthority(cur realm, newOwner address)
+func TransferAuthorityToRealms(cur realm, csvPaths string)
+func TransferAuthorityShared(cur realm, owner address, csvPaths string)
+func Render(cur realm, path string) string
+func RegisterDAO(cur realm, h BallotHouse)
+func ForwardFees(cur realm) int64
+func SetParamStr(cur realm, name, value string)
+```
 
-// gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/dao (permanent)
+Views:
+
+```go
+func LiveImpl() any
+func LivePath() string
+func PendingPaths() []string
+func HistoryPaths() []string
+func Frozen() bool
+func Authority() string
+func Extensions() []string
+func SelfPath() string
+func HasDAO() bool
+func Held() (stakes, unbonding, credits, pools, rewards, bonds, feesPending, deposits int64)
+func HeldTotal() int64
+func Balance() int64
+func Health() string
+func Param(name string) int64
+func ParamStr(name string) string
+func ParamsJSON() string
+func Now() int64
+func GetFeed(id uint64) *Feed
+func GetProvider(feed uint64, addr address) *Provider
+func GetRound(feed, round uint64) *Round
+func GetCredit(addr address) *Credit
+func GetSponsor(feed uint64, addr address) *Sponsorship
+func SponsorOf(feed uint64, consumer address) *Sponsorship
+func GetDispute(id uint64) *DisputeRecord
+func TrustedCap(pkgPath string) int64
+func SlotHolderAt(feed uint64, slot int64, r uint64) address
+func FeedCount() uint64
+func DisputeCount() uint64
+func IterateFeeds(offset, count int, fn func(*Feed) bool)
+func IterateProviders(feed uint64, fn func(*Provider) bool)
+func IterateRounds(feed, start uint64, count int, fn func(*Round) bool)
+func ReverseIterateRounds(feed uint64, count int, fn func(*Round) bool)
+func Store(_ int, rlm realm) *StateRef
+```
+
+### `gno.land/r/clockwork/gnoracle/dao`
+
+```go
 func Stake(cur realm, amount int64)
 func RequestUnstake(cur realm, amount int64)
 func Withdraw(cur realm) int64
-func SettleMember(cur realm, member address, maxN int) int
+func SettleMember(cur realm, member address, maxN int64) int64
 func ClaimFees(cur realm) int64
-func ClaimVoterRewards(cur realm) (orc int64, ugnot int64)
-func Propose(cur realm, kind, payload, title string) uint64          // -send optional deposit
+func ClaimRewards(cur realm) (int64, int64)
+func SyncFees(cur realm) int64
+func Propose(cur realm, kind, payload, title string) uint64
 func Vote(cur realm, proposalID uint64, choice string)
 func Execute(cur realm, proposalID uint64)
+func Cancel(cur realm, proposalID uint64)
+func OpenDisputeVote(cur realm, disputeID uint64, majorRequested bool, summary string) uint64
 func CommitVote(cur realm, disputeID uint64, commitment string)
 func RevealVote(cur realm, disputeID uint64, choice, salt string)
-func OpenDisputeVote(cur realm, disputeID uint64, summary string)    // core only
-func RollDisputeVote(cur realm, disputeID uint64)                     // core only
-func FinishDisputeVote(cur realm, disputeID uint64) (outcome, tier string, weights string) // core only
-func Pause(cur realm) / Unpause(cur realm)                           // guardian, then DAO
-func Register / Accept / Rollback / Freeze / TransferAuthority        // proxy, as above
-func MemberInfo(addr address) string
-func ProposalInfo(id uint64) string
-func Params() string
-func Releases() string
-func Render(path string) string
+func FinishDisputeVote(cur realm, disputeID uint64) (string, string, int64)
+func OpenAppealRound(cur realm, disputeID uint64) uint64
+func FundVoters(cur realm, disputeID uint64, amount int64)
+func RegisterImpl(cur realm, impl DAO)
+func Accept(cur realm, pkgPath string)
+func Rollback(cur realm)
+func WithdrawImpl(cur realm, pkgPath string)
+func Forget(cur realm)
+func Freeze(cur realm)
+func AddExtension(cur realm, pkgPath string)
+func DropExtension(cur realm, pkgPath string)
+func TransferAuthority(cur realm, newOwner address)
+func SetVesting(cur realm, member address, until, floor int64)
+func TransferAuthorityToExec(cur realm)
+func Render(cur realm, path string) string
+func RegisterTrampoline(cur realm, t Trampoline)
+```
 
-// gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/kourt (permanent)
-func KourtCrank(cur realm, disputeID uint64) string                  // returns the new state
-func RedeemFloat(cur realm, amount int64)                            // dao only
-func Register / Accept / Rollback / Freeze / TransferAuthority        // proxy
-func RecordInfo(disputeID uint64) string
-func FloatBalance() int64
+Views:
+
+```go
+func Hooks() core.BallotHouse
+func LiveImpl() any
+func LivePath() string
+func PendingPaths() []string
+func HistoryPaths() []string
+func Frozen() bool
+func Authority() string
+func SelfPath() string
+func Address() address
+func Health() string
+func Param(name string) int64
+func ParamStr(name string) string
+func ParamsJSON() string
+func Now() int64
+func Epoch() uint32
+func GetMember(addr address) *Member
+func GetProposal(id uint64) *Proposal
+func VoteOf(id uint64, addr address) string
+func GetBallot(seq uint64) *Ballot
+func BallotOf(disputeID uint64) uint64
+func CommitOf(seq uint64, addr address) string
+func RevealOf(seq uint64, addr address) string
+func PowerAt(addr address, epoch uint32) int64
+func TotalPowerAt(epoch uint32) int64
+func TotalStaked() int64
+func MemberCount() int
+func ProposalCount() uint64
+func BallotCount() uint64
+func MintedInYear(year int64) int64
+func FeesOwed(addr address) int64
+func Held() (stakedPyth, unbondingPyth, rewardPyth, feeUgnot, rewardUgnot, depositUgnot, knownUgnot int64)
+func IterateProposals(offset, count int, fn func(*Proposal) bool)
+func IterateMembers(offset, count int, fn func(*Member) bool)
+func Store(_ int, rlm realm) *StateRef
+func TreasuryUgnot() int64
+func TreasuryPyth() int64
+```
+
+### `gno.land/r/clockwork/gnoracle/kourt`
+
+```go
+func Crank(cur realm, disputeID uint64) string
+func EnsureCourt(cur realm) string
+func RedeemFloat(cur realm, amount int64) int64
+func Float(cur realm) int64
+func Abandon(cur realm, disputeID uint64, reason string)
+func RegisterImpl(cur realm, impl Mirror)
+func Accept(cur realm, pkgPath string)
+func Rollback(cur realm)
+func WithdrawImpl(cur realm, pkgPath string)
+func Forget(cur realm)
+func Freeze(cur realm)
+func TransferAuthorityToRealms(cur realm, csvPaths string)
+func Render(cur realm, path string) string
+```
+
+Views:
+
+```go
+func GetRecord(disputeID uint64) *Record
+func Count() uint64
+func Address() address
+func SelfPath() string
+func Store(_ int, rlm realm) *StateRef
+func LivePath() string
+func PendingPaths() []string
+func Authority() string
+```
+
+### `gno.land/r/clockwork/gnoracle/token`
+
+```go
+func Transfer(cur realm, to address, amount int64)
+func Approve(cur realm, spender address, amount int64)
+func TransferFrom(cur realm, from, to address, amount int64)
+func Mint(cur realm, to address, amount int64)
+func Burn(cur realm, amount int64)
+func TransferMinter(cur realm, newMinter address)
+```
+
+Views:
+
+```go
+func TotalSupply() int64
+func BalanceOf(owner address) int64
+func Allowance(owner, spender address) int64
+func Minter() address
 func Render(path string) string
 ```
 
-## Appendix B. Events
+## Appendix B. Events (generated from the sources)
 
-`FeedProposed{feedID, proposer, specHash}`, `FeedActivated{feedID, startAt}`,
-`FeedUpdated{feedID, field, value}`, `FeedUnfunded{feedID}`,
-`FeedDeprecated{feedID, reason}`, `Sponsored{feedID, sponsor, periods}`,
-`ProviderRegistered{feedID, provider, stake}`, `ProviderUnbonding{feedID,
-provider, readyAt}`, `ProviderJailed{feedID, provider, misses}`,
-`ProviderSlashed{feedID, provider, amount, tier, reason}`,
-`ProviderEjected{feedID, provider}`, `Submitted{feedID, roundID, provider,
-value}`, `RoundFinalized{feedID, roundID, status, tier, value, eligible,
-pool}`, `CreditDeposited{consumer, amount}`, `Read{consumer, feedID, roundID,
-fee}` (only when `emitReads` is on), `DisputeOpened{disputeID, feedID,
-roundID, disputer, bond, proposedValue, tier}`, `DisputeRolled{disputeID}`,
-`AppealOpened{disputeID, appellant, bond}`, `DisputeResolved{disputeID, round,
-outcome, tier, upholdW, overturnW, minorW, voidW, abstainW}`,
-`MemberStaked{member, amount, epoch}`, `MemberUnstakeRequested{member, amount,
-readyAt}`, `MemberSettled{member, disputes, penaltyPYTH, rewardPYTH,
-rewardUgnot}`, `PenaltyCapped{member, forgiven}`, `ProposalCreated{id, kind}`,
-`ProposalVoted{id, voter, choice, weight}`, `ProposalExecuted{id, ok}`,
-`ParamChanged{name, old, new}`, `ReleaseProposed{realm, path}`,
-`ReleaseAccepted{realm, path, by}`, `ReleaseRolledBack{realm, path, by}`,
-`Frozen{realm}`, `AuthorityTransferred{realm, authority}`,
-`KourtRecord{disputeID, state, claimID}`, `KourtDissent{disputeID, claimID}`,
-`Paused{by}`, `Unpaused{by}`.
+Every `chain.Emit` in the permanent realms and their implementations, with attribute keys in emission order (`<expr>` marks a computed key). The bot announces a configurable subset (`bot.DefaultEvents`).
 
-## Appendix C. Parameter registry (defaults)
+### `gno.land/r/clockwork/gnoracle/core`
 
-| Name | Default | Bounds | Section |
-|---|---|---|---|
-| `feedDeposit` | 5 GNOT | 1 to 1000 GNOT | 4.2 |
-| `providerMinStakeFloor` | 10,000 GNOT | 1,000 to 1,000,000 GNOT | 4.1 |
-| `providerStakeTargetUSD` (per feed class, published) | price feeds $1,500; one-off outcomes $600 | | 4.1 |
-| `stakeFloorSchedule` | 10,000 GNOT at launch, 15,000 after 90 d, 25,000 after 180 d | each step a `param` proposal | 4.1 |
-| `trustedOneOffCap` | 50,000 GNOT declared value at stake | 0 to 10,000,000 GNOT | 4.2 |
-| `oneOffBountyFloor` | 50 GNOT | 1 to 100,000 GNOT | 4.2 |
-| `readPriceFloor` | 0.002 GNOT | 0 to 1 GNOT | 4.1 |
-| `subscriptionFloor` | 100 GNOT / 30 d | 10 to 100,000 GNOT | 4.1 |
-| `maxProviders` | 15 | fixed | 4.1 |
-| `maxCatchUpRounds` | 48 | 1 to 500 | 4.3 |
-| `roundRetention` | 30 d and at least 64 rounds | 7 to 365 d | 4.4 |
-| `retentionAfterDeprecate` | 90 d | 30 to 730 d | 4.2 |
-| `deadFeedRounds` | 168 | 24 to 10000 | 4.2 |
-| `renderDelay` | 10 min | 0 to 24 h | 6.1 |
-| `missSlashBps` | 50 | 0 to 500 | 5.2 |
-| `missSlashCapPerEpochBps` / `providerEpoch` | 500 / 7 d | | 5.2 |
-| `alerterShareBps` | 5000 | 0 to 10000 | 5.2 |
-| `jailAfterMisses` | 3 | 1 to 20 | 5.1 |
-| `jailCooldown` | 24 h | 1 h to 30 d | 5.1 |
-| `strikesToJail` / `strikeWindowRounds` | 5 / 100 | | 5.2 |
-| `minorSlashBps` | 500 | 100 to 2000 | 5.2 |
-| `majorSlashBps` | 10000 | 5000 to 10000 | 5.2 |
-| `minorsToMajor` | 3 per epoch | 2 to 10 | 5.2 |
-| `unbondPeriod` | 14 d | 7 to 60 d | 5.1 |
-| `crankTipBps` | 100 | 0 to 1000 | 5.2 |
-| `feeSplitProviders/Stakers/Treasury` | 7000 / 1500 / 1500 | sum 10000 | 6.2 |
-| `readPriceFinalBps` | 5000 | 0 to 10000 | 6.1 |
-| `subsidyMaxMonths` / `subsidyDecayBps` | 12 / 1000 per month | | 6.2 |
-| `minDisputeBond` | 2,500 GNOT | 100 to 100,000 GNOT | 7.1 |
-| `disputeBondBps` | 1000 | 100 to 10000 | 7.1 |
-| `disputeEscalationWindow` | 7 d | 1 to 90 d | 7.1 |
-| `disputeWindowRecurring` (spec default) | 12 h | 2 h to 14 d | 7.1 |
-| `disputeWindowOneOff` (spec default) | 72 h | 2 h to 14 d | 7.1 |
-| `commitPeriod` / `revealPeriod` | 24 h / 24 h | 6 h to 14 d each | 7.2 |
-| `commitPeriod2` / `revealPeriod2` | 48 h / 24 h | | 7.3 |
-| `disputeQuorumBps` / `decisionBps` | 3300 / 6000 | 500 to 10000, 5001 to 10000 | 7.3 |
-| `disputeQuorumBps2` / `decisionBps2` | 2500 / 5500 | | 7.3 |
-| `appealWindow` | 24 h | 1 h to 7 d | 7.3 |
-| `appealBondMultiple` / `appealConsumeBps` | 2x / 2500 | | 7.3 |
-| `voidConsumeBps` | 500 | 0 to 2000 | 7.3 |
-| `forfeitSplitWinner/Voters/Treasury` | 5000 / 3000 / 2000 | sum 10000 | 7.3 |
-| `maxVoterShareBps` | 2000 | 500 to 3300 | 7.2 |
-| `absenceSlashBps` | 50 | 0 to 1000 | 8.4 |
-| `incoherenceSlashBps` | 50 | 0 to 2000 | 8.4 |
-| `abstainSlashBps` | 5 | 0 to 500 | 8.4 |
-| `maxPenaltyPerWindowBps` / `penaltyWindow` | 500 / 30 d | | 8.4 |
-| `unstakeCooldown` | 7 d | 3 to 60 d | 8.2 |
-| `epochBlocks` | 720 | fixed | 8.2 |
-| `settleMaxN` / `settleTipBps` | 20 / 50 | | 8.2 |
-| `proposeBps` / `proposalDeposit` | 25 / 20 GNOT | | 8.3 |
-| `maxActiveProposals` | 32 | 8 to 128 | 8.3 |
-| `paramChangeMaxBps` | 5000 per change | fixed | 8.3 |
-| `upgradeTimelock` | 7 d | 1 to 30 d | 8.3 |
-| `stakerFeeShareBps` (alias of the fee split) | 1500 | 0 to 5000 | 9.4 |
-| `workGate` | off | on/off | 8.5 |
-| `maxMintPerYearBps` | 200 | 0 to 1000 | 9.1 |
-| `guardianHandoverMembers` | 25 | | 8.6 |
-| `stakeDenom` | `ugnot` | `ugnot` or a grc20reg key | 15 |
+| event | attributes |
+|---|---|
+| `AppealOpened` | `dispute`, `appellant`, `bond` |
+| `AuthorityTransferred` | `authority` |
+| `BondReleased` | `dispute`, `to`, `amount` |
+| `CreditDeposited` | `consumer`, `amount` |
+| `CreditWithdrawn` | `consumer`, `amount` |
+| `DAORegistered` | `path` |
+| `DepositRefunded` | `feed`, `amount` |
+| `DisputeDecided` | `dispute`, `round`, `outcome`, `tier` |
+| `DisputeOpened` | `dispute`, `feed`, `round`, `disputer`, `bond`, `proposedValue`, `tier` |
+| `DisputeResolved` | `dispute`, `round`, `outcome`, `tier`, `slashed` |
+| `DisputeRolled` | `dispute` |
+| `FeedActivated` | `feed`, `startAt` |
+| `FeedDeprecated` | `feed`, `reason` |
+| `FeedProposed` | `feed`, `proposer`, `specHash` |
+| `FeedPruned` | `feed` |
+| `FeedReopened` | `feed`, `resolveAt` |
+| `FeedUnfunded` | `feed` |
+| `FeedUpdated` | `feed` |
+| `FeesForwarded` | `to`, `amount` |
+| `Frozen` | (none) |
+| `ParamChanged` | `name`, `old`, `new` |
+| `ProviderEjected` | `feed`, `provider` |
+| `ProviderJailed` | `feed`, `provider`, `jailings` |
+| `ProviderRegistered` | `feed`, `provider`, `stake` |
+| `ProviderSlashed` | `feed`, `provider`, `amount`, `reason` |
+| `ProviderUnbonding` | `feed`, `provider`, `readyAt` |
+| `ProviderWithdrawn` | `feed`, `provider`, `amount` |
+| `ReleaseAccepted` | `path` |
+| `ReleaseRolledBack` | `path` |
+| `RewardsClaimed` | `feed`, `provider`, `amount` |
+| `RewardsForfeited` | `feed`, `provider`, `amount` |
+| `RoundFinalized` | `feed`, `round`, `status`, `tier`, `value`, `eligible`, `pool` |
+| `Sponsored` | `feed`, `sponsor`, `amount`, `paidUntil` |
+| `Submitted` | `feed`, `round`, `provider`, `value` |
+| `TrustedRequester` | `path`, `cap` |
+| `VotersFunded` | `dispute`, `amount` |
+
+### `gno.land/r/clockwork/gnoracle/dao`
+
+| event | attributes |
+|---|---|
+| `AuthorityTransferred` | `realm`, `authority` |
+| `DisputeBallotOpened` | `dispute`, `ballot`, `round` |
+| `DisputeBallotResolved` | `ballot`, `dispute`, `outcome`, `tier` |
+| `FeesSynced` | `amount`, `stakers` |
+| `Frozen` | `realm` |
+| `MemberStaked` | `member`, `amount`, `staked` |
+| `MemberUnstakeRequested` | `member`, `amount`, `readyAt` |
+| `MemberVesting` | `member`, `until`, `floor` |
+| `ParamChanged` | `name`, `old`, `new` |
+| `PenaltyCapped` | `member`, `forgiven` |
+| `ProposalCreated` | `id`, `kind`, `proposer` |
+| `ProposalStatus` | `id`, `status` |
+| `ProposalVoted` | `id`, `voter`, `choice`, `weight` |
+| `ReleaseAccepted` | `realm`, `path` |
+| `ReleaseRolledBack` | `realm`, `path` |
+| `RewardShortfall` | `member`, `pending`, `available` |
+
+### `gno.land/r/clockwork/gnoracle/kourt`
+
+| event | attributes |
+|---|---|
+| `AuthorityTransferred` | `realm`, `authority` |
+| `FloatRedeemed` | `amount` |
+| `KourtDissent` | `dispute`, `claim` |
+| `KourtRecord` | `dispute`, `state` / `dispute`, `state`, `claim` |
+
+## Appendix C. Parameter registry (generated from the sources)
+
+Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 50% per change; the bounds themselves and one-unit steps are always allowed). A parameter changes at most once per block height. Amounts are ugnot (PYTH base units on the DAO), times are seconds.
+
+### `gno.land/r/clockwork/gnoracle/core`
+
+| name | default | min | max | change | what |
+|---|---|---|---|---|---|
+| `feedDeposit` | 5,000,000 | 1,000,000 | 1,000 GNOT/PYTH (1000000000) | 5000 | deposit attached to a feed proposal, refunded unless spam |
+| `providerMinStakeFloor` | 10,000 GNOT/PYTH (10000000000) | 1,000 GNOT/PYTH (1000000000) | 1,000,000 GNOT/PYTH (1000000000000) | 5000 | smallest providerMinStake a spec may set |
+| `readPriceFloor` | 2,000 | 0 | 1,000,000 | 5000 | smallest readPrice a non-sponsored spec may set |
+| `subscriptionFloor` | 100 GNOT/PYTH (100000000) | 10,000,000 | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest subscriptionPrice per period |
+| `bountyFloor` | 50,000,000 | 1,000,000 | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest one-off bounty |
+| `subscriptionPeriod` | 30 d (2592000 s) | 7 d (604800 s) | 90 d (7776000 s) | 5000 | length of one subscription period |
+| `maxCatchUpRounds` | 48 | 1 | 500 | 5000 | stale rounds written off per CatchUp call |
+| `roundRetention` | 30 d (2592000 s) | 7 d (604800 s) | 365 d (31536000 s) | 5000 | seconds after finality before a round may be pruned |
+| `minRoundsKept` | 64 | 8 | 10,000 | 5000 | rounds always kept per feed regardless of age |
+| `retentionAfterDeprecate` | 90 d (7776000 s) | 30 d (2592000 s) | 730 d (63072000 s) | 5000 | seconds after deprecation before a feed may be pruned |
+| `deadFeedRounds` | 168 | 24 | 10,000 | 5000 | consecutive empty rounds after which a feed is deprecated on prune |
+| `renderDelay` | 600 | 0 | 1 d (86400 s) | 5000 | seconds a final value must age before free views show it |
+| `trustedOneOffCap` | 50,000 GNOT/PYTH (50000000000) | 0 | 10,000,000 GNOT/PYTH (10000000000000) | 5000 | largest declared value at stake a trusted requester may self-activate |
+| `missSlashBps` | 50 | 0 | 500 | 5000 | slash per missed round on a funded feed |
+| `missSlashCapPerEpochBps` | 500 | 0 | 10,000 | 5000 | largest total miss slash per provider per providerEpoch |
+| `providerEpoch` | 7 d (604800 s) | 1 d (86400 s) | 90 d (7776000 s) | 5000 | window of the miss slash cap and the minor-slash escalation |
+| `alerterShareBps` | 5,000 | 0 | 10,000 | 5000 | share of a miss slash paid to whoever recorded it |
+| `jailAfterMisses` | 3 | 1 | 20 | 5000 | consecutive misses that jail a provider |
+| `jailCooldown` | 1 d (86400 s) | 1 h (3600 s) | 30 d (2592000 s) | 5000 | seconds before a jailed provider may unjail |
+| `maxJailings` | 3 | 1 | 20 | 5000 | jailings within 30 days that force unbonding |
+| `strikesToJail` | 5 | 1 | 100 | 5000 | out-of-tolerance submissions within strikeWindowRounds that jail |
+| `strikeWindowRounds` | 100 | 10 | 10,000 | 5000 | rounds over which strikes are counted |
+| `minorSlashBps` | 500 | 100 | 2,000 | 5000 | slash at the minor tier after a lost dispute |
+| `majorSlashBps` | 10,000 | 5,000 | 10,000 | 5000 | slash at the major tier after a lost dispute (ejects) |
+| `minorsToMajor` | 3 | 2 | 10 | 5000 | minor slashes within a providerEpoch that escalate to major |
+| `unbondPeriod` | 14 d (1209600 s) | 7 d (604800 s) | 60 d (5184000 s) | 5000 | seconds between RequestUnbond and Withdraw |
+| `crankTipBps` | 100 | 0 | 1,000 | 5000 | share of a round pool paid to whoever finalises it |
+| `feeSplitProvidersBps` | 7,000 | 0 | 10,000 | 5000 | share of subscriptions and read fees to the feed pool |
+| `feeSplitStakersBps` | 1,500 | 0 | 5,000 | 5000 | share of subscriptions and read fees to DAO stakers |
+| `readPriceFinalBps` | 5,000 | 0 | 10,000 | 5000 | price of a final-only read as a share of readPrice |
+| `minDisputeBond` | 2,500 GNOT/PYTH (2500000000) | 100 GNOT/PYTH (100000000) | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest dispute bond |
+| `disputeBondBps` | 1,000 | 100 | 10,000 | 5000 | dispute bond as a share of the feed's active stake |
+| `disputeEscalationWindow` | 7 d (604800 s) | 1 d (86400 s) | 90 d (7776000 s) | 5000 | seconds within which repeat disputes on a feed double the bond |
+| `appealWindow` | 1 d (86400 s) | 1 h (3600 s) | 7 d (604800 s) | 5000 | seconds after a decided round in which an appeal may be posted |
+| `appealBondMultiple` | 2 | 1 | 10 | 5000 | appeal bond as a multiple of the dispute bond |
+| `appealConsumeBps` | 2,500 | 0 | 10,000 | 5000 | share of a losing appeal bond consumed |
+| `voidConsumeBps` | 500 | 0 | 2,000 | 5000 | share of the bond consumed on a void outcome |
+| `forfeitSplitWinnerBps` | 5,000 | 0 | 10,000 | 5000 | share of forfeitures to the prevailing party |
+| `forfeitSplitVotersBps` | 3,000 | 0 | 10,000 | 5000 | share of forfeitures to coherent voters |
+| `kourtRealm` | "" |  |  | text | package path of the Kourt adapter realm |
+
+### `gno.land/r/clockwork/gnoracle/dao`
+
+| name | default | min | max | change | what |
+|---|---|---|---|---|---|
+| `epochBlocks` | 720 | 720 | 720 | 0 | blocks per voting-weight epoch |
+| `unstakeCooldown` | 7 d (604800 s) | 3 d (259200 s) | 60 d (5184000 s) | 5000 | seconds between RequestUnstake and Withdraw |
+| `settleMaxN` | 20 | 1 | 200 | 5000 | resolved disputes processed per member per settle |
+| `settleTipBps` | 50 | 0 | 1,000 | 5000 | share of settled penalties paid to whoever runs SettleMember |
+| `stakerFeeShareBps` | 5,000 | 0 | 10,000 | 5000 | share of forwarded fees credited to stakers (rest to the treasury) |
+| `absenceSlashBps` | 50 | 0 | 1,000 | 5000 | penalty per dispute a member did not reveal in |
+| `incoherenceSlashBps` | 50 | 0 | 2,000 | 5000 | penalty per dispute a member voted against the outcome |
+| `abstainSlashBps` | 5 | 0 | 500 | 5000 | penalty per dispute a member abstained in |
+| `maxPenaltyPerWindowBps` | 500 | 0 | 10,000 | 5000 | largest total penalty per member per penaltyWindow |
+| `penaltyWindow` | 30 d (2592000 s) | 7 d (604800 s) | 365 d (31536000 s) | 5000 | window of the penalty cap |
+| `maxVoterShareBps` | 2,000 | 1,250 | 3,300 | 5000 | largest share of revealed weight one address may hold |
+| `disputeQuorumBps` | 3,300 | 500 | 10,000 | 5000 | round-1 quorum of obligated weight |
+| `decisionBps` | 6,000 | 5,001 | 10,000 | 5000 | round-1 share of the two sides a side needs |
+| `disputeQuorumBps2` | 2,500 | 500 | 10,000 | 5000 | round-2 quorum |
+| `decisionBps2` | 5,500 | 5,001 | 10,000 | 5000 | round-2 decision bar |
+| `commitPeriod` | 1 d (86400 s) | 6 h (21600 s) | 14 d (1209600 s) | 5000 | round-1 commit phase |
+| `revealPeriod` | 1 d (86400 s) | 6 h (21600 s) | 14 d (1209600 s) | 5000 | round-1 reveal phase |
+| `commitPeriod2` | 2 d (172800 s) | 6 h (21600 s) | 14 d (1209600 s) | 5000 | round-2 commit phase |
+| `revealPeriod2` | 1 d (86400 s) | 6 h (21600 s) | 14 d (1209600 s) | 5000 | round-2 reveal phase |
+| `proposeBps` | 25 | 0 | 1,000 | 5000 | share of staked supply a proposer must hold to skip the deposit |
+| `proposalDeposit` | 20,000,000 | 0 | 1,000 GNOT/PYTH (1000000000) | 5000 | deposit for a proposer below proposeBps, refunded on quorum |
+| `maxActiveProposals` | 32 | 8 | 128 | 5000 | live proposals at once |
+| `executionWindow` | 7 d (604800 s) | 1 d (86400 s) | 90 d (7776000 s) | 5000 | seconds after the timelock in which a passed proposal may execute |
+| `minStake` | 1,000,000 | 1 | 1,000,000 GNOT/PYTH (1000000000000) | 5000 | smallest stake that makes a member |
+| `maxMintPerYearBps` | 200 | 0 | 1,000 | 5000 | largest mint per 365 days as a share of supply |
+| `upgradeTimelock` | 7 d (604800 s) | 1 d (86400 s) | 30 d (2592000 s) | 5000 | timelock of upgrade-accept proposals |
+| `guardianHandoverMembers` | 25 | 1 | 1,000 | 5000 | staked members at which the guardian hands authority over |
+| `kourtRealm` | "" |  |  | text | package path of the Kourt adapter realm |
 
 ## Appendix D: machine views
 

@@ -74,9 +74,9 @@ One `[[feeds]]` table per feed, with a `source`:
 
 Safety settings per feed:
 
-- `sanity_bps` (default 2000): the agent refuses a value more than 20% away
-  from its last submission (or the public delayed aggregate) and alerts you.
-  Set `override = true` for one run when the move is real.
+- `sanity_bps` (default 2000, `-1` disables): the agent refuses a value more
+  than 20% away from its last submission (or the public delayed aggregate)
+  and alerts you. Set `override = true` for one run when the move is real.
 - `min` and `max`: absolute bounds in feed units.
 - `jitter`: seconds after the round opens before fetching, to avoid every
   provider hitting a source at the same second.
@@ -125,10 +125,12 @@ frivolous disputes cost the disputer, not you.
 
 ## 7. Leaving
 
-`gnoracle unbond <feed>` removes you from the active set immediately and
-starts the 14-day unbonding clock; `gnoracle withdraw <feed>` pays out after
-it. Unbonding stake can still be slashed for a dispute on a round you
-submitted to, which is what makes the dispute window meaningful.
+`gnoracle unbond <feed>` removes you from the active set from the next
+round and starts the 14-day unbonding clock; `gnoracle withdraw <feed>` pays
+out after it. Unbonding stake can still be slashed, for a missed round you
+still owed and for a dispute on a round you submitted to, which is what
+makes the dispute window meaningful. A one-off feed accepts no new
+providers once its round has opened.
 
 ## 8. Checklist before going live
 

@@ -28,10 +28,13 @@ func Settle(cur realm) {
   index; the labels are in the spec.
 
 What the tiers mean (plan §4.3): `consensus` is a round where at least
-`minProviders` agreed within tolerance; `provisional` had fewer; `final` is
-either once the dispute window passed; `disputed` has an open dispute (use
-the previous round or wait); `stale` means no round finalised within two
-intervals.
+`minProviders` agreed within tolerance and the value stayed within the
+quarantine band of the last final value; `provisional` had fewer or moved
+more; `final` is either once the dispute window passed; `disputed` means the
+latest round is under dispute, and the value returned with it is the last
+final round's, not the disputed one (zero and round 0 when no final round
+exists yet); a voided latest round also falls back to the last final one;
+`stale` means no round finalised within two intervals.
 
 Keep the value a single `provisional` read controls below the feed's value
 at risk (half the active stake times the major-slash share, divided per
@@ -47,9 +50,11 @@ gnoracle deposit 100gnot <realm address>          # DepositFor: credits the real
 gnoracle -raw call <core> WithdrawCredit 50000000 # returns unused credit to the caller's own account
 ```
 
-`SetFinalOnly(true)` halves the price and serves the latest final round; the
-consumer sets it on its own credit record, so a realm consumer exposes a
-small owner-only function that calls `core.SetFinalOnly(cross(cur), true)`.
+`SetFinalOnly(true)` halves the price and serves the last final round (tier
+`final`), whatever the latest round's state; the consumer sets it on its own
+credit record, so a realm consumer exposes a small owner-only function that
+calls `core.SetFinalOnly(cross(cur), true)`. Nothing is charged when nothing
+is served.
 
 Metered prices are per feed (`spec.readPrice`, floor 0.002 GNOT). A realm
 that reads often is cheaper on a subscription: see

@@ -36,6 +36,11 @@ type Config struct {
 	Remind   RemindConfig       `toml:"remind"`
 	Crank    CrankConfig        `toml:"crank"`
 	Events   []string           `toml:"events"` // event types to announce (default: the protocol's notable ones)
+	// Release events (UpgradeProposed, UpgradeAccepted, UpgradeRolledBack,
+	// UpgradeFrozen, AuthorityTransferred) are emitted by the upgrade proxy
+	// package, not by the realms; its path on the chain in use (default: the
+	// mainnet and dev paths).
+	ProxyPaths []string `toml:"proxy_paths"`
 }
 
 // TelegramConfig is the channel the bot posts to.
@@ -79,7 +84,14 @@ var DefaultEvents = []string{
 	"DisputeOpened", "DisputeBallotOpened", "DisputeRolled", "AppealOpened", "DisputeDecided", "DisputeResolved",
 	"ProposalCreated", "ProposalStatus", "ProviderJailed", "ProviderSlashed", "ProviderEjected", "KourtDissent",
 	"FeedProposed", "FeedActivated", "FeedDeprecated", "FeedUnfunded", "FeedReopened",
-	"ReleaseAccepted", "ReleaseRolledBack", "Frozen", "AuthorityTransferred", "ParamChanged", "UpgradeProposed",
+	"ReleaseAccepted", "ReleaseRolledBack", "Frozen", "AuthorityTransferred", "ParamChanged",
+	"UpgradeProposed", "UpgradeAccepted", "UpgradeRolledBack", "UpgradeFrozen", "UpgradeWithdrawn",
+}
+
+// DefaultProxyPaths are the upgrade proxy package's known deployments.
+var DefaultProxyPaths = []string{
+	"gno.land/p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/upgradeable/v0",
+	"gno.land/p/clockwork/upgradeable/v0",
 }
 
 // Load reads and validates bot.toml.
@@ -143,6 +155,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Events) == 0 {
 		c.Events = DefaultEvents
+	}
+	if len(c.ProxyPaths) == 0 {
+		c.ProxyPaths = DefaultProxyPaths
 	}
 	c.Gas.Defaults()
 	for _, m := range c.Members {

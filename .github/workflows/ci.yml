@@ -24,6 +24,8 @@ jobs:
       - run: go test ./...
       - name: simulation report is current
         run: go run ./sim | diff - docs/SIMULATION.md
+      - name: plan appendices are current
+        run: python3 scripts/gen-appendices.py --check
 
   gno:
     name: Gno realms and packages (v1.2.0)

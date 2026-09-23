@@ -44,7 +44,7 @@ Providers before the run (`gnoracle providers 1`): the two providers `make chain
 | `g1y0rdyznt4hprxqgxz366uar3v5pe247ksrr434` | active | 1 | 1000000000 | 0 | 1604 |
 
 ## 1a. The chain was new
-gnodev was started from scratch shortly before 14:00:40 UTC (`make dev RPC=36657 WEB=38888`) and `make chain-test` then drove the whole lifecycle once: accept the implementations, create and activate feed 1, register two providers, submit two rounds, deposit consumer credit and read, stake in the DAO, forward fees, found the Kourt court and file a claim. Its step headings, unedited:
+gnodev was started from scratch shortly before 14:00:40 UTC (`make dev RPC=36657 WEB=38888`) and `make chain-test` then drove the whole lifecycle once: accept the implementations, create and activate feed 1, register two providers, submit two rounds, deposit consumer credit and read, stake in the DAO, forward fees, found the Kourt court and fund its float. Its step headings, unedited:
 
 ```
 state before
@@ -195,7 +195,7 @@ finalize_grace = "20s"
 ```
 
 ## 5. The run, as one timeline
-The agents and the bot ran for 300 seconds. Below are their log lines merged and sorted by time. Agents are `test1`, `prov2`, `soak1`; `bot` lines are the messages the bot would have posted to Telegram (`RoundFinalized` and `Submitted` are announced here because the dev config lists them; the default list is the dispute, proposal, provider and release events).
+The agents and the bot ran for 300 seconds. Below are their log lines merged and sorted by time. Agents are `test1`, `prov2`, `soak1`; `bot` lines are the messages the bot would have posted to Telegram (`RoundFinalized` and `Submitted` are announced here because the dev config lists them; the default list covers disputes, proposals, providers, feed lifecycle, releases, authority and parameter changes).
 
 ```text
 17:02:17  prov2  agent: gno.land/r/clockwork/gnoracle/core on http://127.0.0.1:36657 as g1y0rdyznt4hprxqgxz366uar3v5pe247ksrr434, 1 feed(s), poll 2s

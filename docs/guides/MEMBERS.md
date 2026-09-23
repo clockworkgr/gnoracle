@@ -9,14 +9,16 @@ Missing a ballot or voting against the outcome costs a small slice of stake
 
 ```sh
 gnoracle status                                  # DAO totals, epoch
-gnoracle stake 1000                              # 1,000 PYTH (6 decimals; "1000000000u" for base units)
+gnoracle stake 1000                              # approves the DAO on the token, then stakes 1,000 PYTH ("1000000000u" for base units)
 gnoracle member <your address>                   # staked, power, feesOwed, cursor
 ```
 
 Voting power is your stake checkpointed at the start of the next epoch (720
 blocks), so stake before a dispute you want to vote on, not after.
 `gnoracle unstake <pyth>` starts the 7-day cooldown; `gnoracle dao-withdraw`
-pays out after it. Founder allocations carry a vesting floor.
+pays out after it. A partial unstake must leave at least 1 PYTH staked, and a second unstake waits until the first is withdrawn.
+Founder allocations carry a vesting floor set by the authority or a
+`vesting` proposal; the floor cannot be unstaked before its date.
 
 ## Fees and rewards
 
@@ -42,7 +44,9 @@ gnoracle reveal 7                                # during the reveal phase
 `~/.gnoracle/votes/<chain>-<dispute>-<round>.json`, then sends
 `CommitVote`. `reveal` reads that file and sends `RevealVote`. Keep the
 file until the reveal is on chain; if you vote from several machines, copy
-it. A commitment cannot be changed once sent.
+it. Running `commit` again with another choice during the commit phase
+replaces the commitment on chain and the saved salt (only once the
+transaction committed).
 
 Choices:
 
@@ -54,9 +58,11 @@ Choices:
 | `VOID` | the round cannot be judged (ambiguous spec, missing data); the round is voided, 5% of the bond consumed |
 | `ABSTAIN` | counted for quorum, no position; 0.05% penalty instead of 0.5% |
 
-The decision needs 33% of obligated weight revealed and 60% of the revealed
-weight behind one choice; otherwise the ballot rolls to a 48 h + 24 h second
-round with 25% and 55%. The heaviest voters are clipped at 20% of obligated
+The decision needs 33% of obligated weight revealed and 60% of the weight
+on the two sides (UPHOLD against OVERTURN and OVERTURN_MINOR together; VOID
+and ABSTAIN count for quorum, not for this bar) behind one side; a strict
+majority of everything revealed can VOID instead. Otherwise the ballot rolls
+to a 48 h + 24 h second round with 25% and 55%. The heaviest voters are clipped at 20% of obligated
 weight when deciding, so no single staker decides alone. A decided round
 can be appealed within 24 h for twice the bond; the appeal round is final.
 
@@ -69,7 +75,10 @@ can be appealed within 24 h for twice the bond; the appeal round is final.
 | abstain | 0.05% | |
 
 Penalties are applied lazily: `gnoracle settle` (or the bot, for opted-in
-members) walks your resolved ballots and applies penalties and rewards.
+members) walks your resolved ballots once the core has applied each
+outcome and applies penalties and rewards. Staking and unstaking are not
+blocked by a running ballot; withdrawing unbonded stake waits for ballots
+you hold weight in.
 Coherent voters share 30% of forfeited bonds and slashes plus the DAO's
 voter fund. Once a member hits the 30-day cap, `PenaltyCapped` is emitted
 and no more is taken that window.
@@ -84,11 +93,13 @@ gnoracle propose param "core.readPriceFloor=3000" "Raise the read floor" 20gnot
 ```
 
 Kinds: `feed-accept`, `feed-update`, `feed-deprecate`, `provider-remove`,
-`param`, `treasury`, `mint`, `upgrade-accept`, `upgrade-rollback`,
-`upgrade-freeze`, `authority-transfer`, `trusted-requester`, `text`. Each
-has its own quorum, threshold, voting period and timelock (plan §8.4). A
-proposal needs 0.25% of staked power to open and a 20 GNOT deposit that is
-refunded unless the proposal is marked as spam.
+`param`, `treasury`, `mint`, `upgrade-accept`, `upgrade-rollback`, `freeze`,
+`authority-transfer` (each of the last four names `core`, `dao` or `kourt`),
+`trusted-requester`, `vesting`, `kourt-abandon`, `text`. Each has its own
+quorum, threshold, voting period and timelock (plan §8.3); a proposal carries
+when strictly more than the bar votes yes. To open one you hold 0.25% of the
+staked supply or attach a 20 GNOT deposit, refunded when the vote reaches
+quorum and forfeited to the treasury when it does not.
 
 ## Reminders and settlement by the bot
 

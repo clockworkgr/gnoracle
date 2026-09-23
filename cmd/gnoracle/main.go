@@ -269,7 +269,7 @@ func (c *cli) run(cmd string, a []string) error {
 			fmt.Printf("core  %s: %v\n", c.core, err)
 		}
 		if d, err := c.client.DAONow(c.dao); err == nil {
-			fmt.Printf("dao   %s epoch %d staked %d members %d proposals %d ballots %d live %s\n", c.dao, d.Epoch, d.TotalStaked, d.MemberCount, d.ProposalCount, d.BallotCount, d.Live)
+			fmt.Printf("dao   %s address %s epoch %d staked %d members %d proposals %d ballots %d live %s\n", c.dao, d.Address, d.Epoch, d.TotalStaked, d.MemberCount, d.ProposalCount, d.BallotCount, d.Live)
 		} else {
 			fmt.Printf("dao   %s: %v\n", c.dao, err)
 		}

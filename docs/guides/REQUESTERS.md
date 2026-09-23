@@ -34,7 +34,7 @@ One-off:
 ```json
 {
   "name": "Match 2026-10-04 Home vs Away",
-  "kind": "one-off",
+  "kind": "oneoff",
   "valueType": "categorical",
   "options": ["Home", "Draw", "Away", "Abandoned"],
   "resolveAt": 1791158400,
@@ -45,6 +45,7 @@ One-off:
   "maxProviders": 5,
   "providerMinStake": 10000000000,
   "disputeWindow": 86400,
+  "readPrice": 2000,
   "valueAtStake": 20000000
 }
 ```
@@ -59,16 +60,19 @@ sources produce disputes.
 ## Proposing
 
 ```sh
-gnoracle propose-feed spec.json 5gnot            # ProposeFeed with the deposit
-gnoracle feed <id>                               # status proposed
+gnoracle propose-feed spec.json 1005gnot         # the 5 GNOT deposit plus the first period (or the bounty)
+gnoracle feed <id>                               # status proposed; deposit and prepayment escrowed
 ```
 
 A DAO member then opens a `feed-accept` proposal (`gnoracle propose
 feed-accept <id> "Accept GNOT/USD" 20gnot`); members vote; on execution the
-feed activates at the next interval boundary and the deposit is refunded.
-Rejections refund too unless the proposal marks the spec as spam. A realm
-that proposes gets its refund as read credit, since realms cannot receive
-coins from calls.
+feed activates at the next interval boundary, the deposit is refunded and
+the prepaid period becomes the first subscription (a bounty becomes the
+pool). A request the DAO does not want is closed with a `feed-deprecate`
+proposal on the proposed feed, which refunds the deposit and the prepayment;
+with the reason `spam` the deposit is forfeited and the prepayment still
+returns. A realm that proposes gets refunds as read credit, since realms
+cannot receive coins from calls.
 
 Trusted requesters (allowlisted realm paths with a cap set by the DAO,
 `trusted-requester` proposal kind) activate one-off feeds themselves when the
@@ -84,5 +88,5 @@ community. `gnoracle feed <id>` shows `activeCount` against `maxProviders`;
 `gnoracle rounds <id>` shows values arriving.
 
 Changing a live spec (`feed-update` proposal) is limited to the fields that
-do not change the meaning of past rounds: prices, provider counts, tolerance,
-window, description, tags.
+do not change the meaning of past rounds: `readPrice`, `subscriptionPrice`,
+`providerMinStake`, `toleranceBps`, `quarantineBps` and `disputeWindow`.

@@ -10,8 +10,8 @@ stakers, 15% to the treasury.
 - Your consumer realms read without per-read charges.
 - The feed keeps providers: a feed whose pool is empty is `unfunded`,
   providers are not paid, and after enough empty rounds it is deprecated.
-- Several sponsors can share a feed; each period's cost is split among that
-  period's sponsors and any surplus rolls forward.
+- Several sponsors can pay for the same feed; each payment extends the
+  feed's coverage and adds to its pool.
 
 ## How
 
@@ -21,9 +21,11 @@ gnoracle sponsor 1 3 g1consumerA...,g1consumerB... 3000gnot
 #                 ^feed ^periods ^up to 8 consumer addresses  ^periods x subscriptionPrice
 ```
 
-`paidUntil` moves forward by the periods bought; the drip per round is
-recomputed from the pool. Renew before `paidUntil`; the bot posts
-`FeedUnfunded` when a pool runs dry.
+`paidUntil` moves forward by the periods bought (1 to 12 at a time) and 70%
+of the payment joins the pool. The drip per round is fixed from the spec's
+`subscriptionPrice` (recomputed only when a `feed-update` changes it), so a
+bigger pool lasts longer rather than paying more per round. Renew before
+`paidUntil`; the bot posts `FeedUnfunded` when a pool runs dry.
 
 To fund a one-off outcome instead of a recurring feed, top up its bounty:
 `gnoracle call <core> FundBounty <feed>` with `-send`.

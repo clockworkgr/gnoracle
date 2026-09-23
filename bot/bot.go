@@ -37,6 +37,9 @@ func New(cfg *Config, client *gnochain.Client) (*Bot, error) {
 	if cfg.Kourt != "" {
 		pkgs[cfg.Kourt] = true
 	}
+	for _, p := range cfg.ProxyPaths {
+		pkgs[p] = true
+	}
 	return &Bot{cfg: cfg, p: p, client: client, notifier: notify.New(cfg.Telegram.Token, cfg.Telegram.Echo), state: state, pkgs: pkgs, batch: map[uint64]int64{}}, nil
 }
 

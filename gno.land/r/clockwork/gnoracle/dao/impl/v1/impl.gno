@@ -58,6 +58,11 @@ func (*implV1) RequestUnstake(_ int, rlm realm, member address, amount int64) {
 	if amount <= 0 || amount > m.Staked {
 		panic("dao: amount exceeds the stake")
 	}
+	// leave nothing or at least the minimum: dust positions would let the fee
+	// accumulator's per-share value run away
+	if rest := m.Staked - amount; rest > 0 && rest < param("minStake") {
+		panic("dao: unstake everything or keep at least " + i(param("minStake")) + " base units staked")
+	}
 	if now() < m.VestedUntil && m.Staked-amount < m.VestFloor {
 		panic("dao: vesting keeps " + i(m.VestFloor) + " staked until " + i(m.VestedUntil))
 	}
