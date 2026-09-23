@@ -120,6 +120,21 @@ func TestDisputeUpheldPaysProvidersAndVoters(cur realm, t *testing.T) {
 	uassert.Equal(t, int64(1_500_000*pyth), b.Obligated)
 	uassert.True(t, b.MajorRequested)
 
+	// an open ballot no longer freezes stake changes (weights are sealed per
+	// epoch): alice adds one PYTH and starts unbonding it again
+	stake(cur, alice, 1*pyth)
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	dao.RequestUnstake(cross(cur), 1*pyth)
+	uassert.Equal(t, int64(1_000_000*pyth), dao.GetMember(alice).Staked)
+	// the disputed value is not served: a reader gets no value under the
+	// disputed tier and pays nothing (there is no earlier final round yet)
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	dv, _, _, _, dtier := core.Read(cross(cur), id)
+	uassert.Equal(t, int64(0), dv)
+	uassert.Equal(t, "disputed", dtier)
+
 	// not resolvable while the ballot runs
 	testing.SetRealm(testing.NewUserRealm(watcher))
 	nosend()

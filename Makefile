@@ -41,6 +41,10 @@ toolchain: ## build the pinned gno and gnokey ($(GNO_REF)) into $(GNO_STORE) (on
 		mkdir -p "$(GNO_STORE)"; \
 		GOBIN="$(GNO_STORE)" go install "github.com/gnolang/gno/gno.land/cmd/gnokey@$(GNO_REF)" || exit 1; \
 	fi; \
+	if [ ! -d "$(GNOROOT)/gnovm/stdlibs" ]; then \
+		echo "fetching the gno $(GNO_REF) sources for GNOROOT (stdlibs)"; \
+		go mod download "github.com/gnolang/gno@$(GNO_REF)" || exit 1; \
+	fi; \
 	echo "gno: $(GNO)"; echo "gnokey: $(GNOKEY)"; echo "GNOROOT: $(GNOROOT)"
 
 deps: ## mirror on-chain dependencies into deps/ (needed for the realms, not the pure packages)
@@ -61,13 +65,15 @@ lint: toolchain deps ## gno lint
 fmt: toolchain ## gno fmt, in place
 	$(GNO) fmt -w $(PKGS)
 
-# Ports: override when another local chain already holds the defaults,
-# e.g. make dev RPC=36657 WEB=38888 (chain-test then needs REMOTE=http://127.0.0.1:36657).
+# Ports. The dev configs (configs/*.dev.toml, scripts/agent-soak.sh) and the
+# documented chain-test invocation use 36657/38888, so that a second gnodev on
+# the stock ports can coexist; run `make dev RPC=36657 WEB=38888` to match them.
 RPC ?= 26657
 WEB ?= 8888
+DEV_PATHS ?= gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/core/impl/v2,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/impl/v2,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1
 
-dev: toolchain deps ## local chain + gnoweb at http://127.0.0.1:$(WEB)/r/clockwork/gnoracle/core
-	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -paths gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1 -web-home /r/clockwork/gnoracle/core .
+dev: toolchain deps ## local chain + gnoweb (RPC=36657 WEB=38888 matches the dev configs); do not edit the tree while it runs
+	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -paths $(DEV_PATHS) -web-home /r/clockwork/gnoracle/core .
 
 chain-test: ## drive a running gnodev through a feed lifecycle with gnokey (needs make dev in another shell)
 	@./scripts/chain-test.sh

@@ -594,3 +594,42 @@ func TestObligationsAndDepartures(cur realm, t *testing.T) {
 	uassert.Equal(t, int64(0), core.GetProvider(id, alice).ConsecutiveMisses) // not obliged any more
 	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
 }
+
+// TestRejectedRequestRefundsPrepayment pins the escrow: a request's prepaid
+// period waits with the deposit until activation; a rejection returns both,
+// a spam rejection forfeits the deposit only.
+func TestRejectedRequestRefundsPrepayment(cur realm, t *testing.T) {
+	install(cur)
+	spec := priceSpec(3600, 600, 1_000*gnot, 20_000, 100*gnot)
+	heldBefore := core.HeldTotal()
+	testing.SetRealm(testing.NewUserRealm(requester))
+	pay(105 * gnot)
+	id := core.ProposeFeed(cross(cur), spec)
+	f := core.GetFeed(id)
+	uassert.Equal(t, int64(5*gnot), f.Deposit)
+	uassert.Equal(t, int64(100*gnot), f.Prepaid)
+	uassert.Equal(t, int64(0), f.Pool)
+	uassert.Equal(t, heldBefore+105*gnot, core.HeldTotal())
+
+	_, _, _, _, _, _, feesBefore, _ := core.Held()
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.DeprecateFeed(cross(cur), id, "not needed")
+	f = core.GetFeed(id)
+	uassert.Equal(t, int64(0), f.Deposit)
+	uassert.Equal(t, int64(0), f.Prepaid)
+	uassert.Equal(t, heldBefore, core.HeldTotal()) // everything went back to the requester
+	_, _, _, _, _, _, feesAfter, _ := core.Held()
+	uassert.Equal(t, feesBefore, feesAfter)
+
+	testing.SetRealm(testing.NewUserRealm(requester))
+	pay(105 * gnot)
+	id2 := core.ProposeFeed(cross(cur), spec)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	core.DeprecateFeed(cross(cur), id2, "spam")
+	_, _, _, _, _, _, feesSpam, _ := core.Held()
+	uassert.Equal(t, feesAfter+5*gnot, feesSpam)        // the deposit is forfeited
+	uassert.Equal(t, heldBefore+5*gnot, core.HeldTotal()) // the prepayment still returned
+	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
+}

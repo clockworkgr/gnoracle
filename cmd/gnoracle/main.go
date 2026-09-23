@@ -26,13 +26,13 @@ import (
 )
 
 type cli struct {
-	remote, chain, ns, core, dao, kourt string
-	keyHome, key, passwordFile          string
-	gasMode, gasPrice                   string
-	gasWanted                           int64
-	send                                string
-	raw                                 bool
-	client                              *gnochain.Client
+	remote, chain, ns, core, dao, kourt, token string
+	keyHome, key, passwordFile                 string
+	gasMode, gasPrice                          string
+	gasWanted                                  int64
+	send                                       string
+	raw                                        bool
+	client                                     *gnochain.Client
 }
 
 func env(name, def string) string {
@@ -67,10 +67,10 @@ Consumer and requester (signs)
   appeal <dispute> <bond> | resolve <dispute>
 
 DAO member (signs)
-  stake <pyth> | unstake <pyth> | dao-withdraw | dao-claim | settle [addr]
-  commit <dispute> <UPHOLD|OVERTURN|OVERTURN_MINOR|VOID|ABSTAIN>   salt saved under ~/.gnoracle/votes
+  stake <pyth> | unstake <pyth> | dao-withdraw | dao-claim | settle [addr]   (stake approves the DAO on the token first)
+  commit <dispute> <UPHOLD|OVERTURN|OVERTURN_MINOR|VOID|ABSTAIN>   salt saved under ~/.gnoracle/votes; re-run to change the choice
   reveal <dispute>
-  vote <proposal> <yes|no|abstain> | execute <proposal>
+  vote <proposal> <yes|no|abstain> | execute <proposal>   (choice is case-insensitive)
   propose <kind> <payload> <title> <deposit>
 
 Anything
@@ -89,6 +89,7 @@ func main() {
 	fs.StringVar(&c.core, "core", env("GNORACLE_CORE", ""), "core realm path (overrides -ns)")
 	fs.StringVar(&c.dao, "dao", env("GNORACLE_DAO", ""), "dao realm path (overrides -ns)")
 	fs.StringVar(&c.kourt, "kourt", env("GNORACLE_KOURT", ""), "kourt mirror realm path (overrides -ns)")
+	fs.StringVar(&c.token, "token", env("GNORACLE_TOKEN", ""), "PYTH token realm path (overrides -ns)")
 	fs.StringVar(&c.keyHome, "key-home", env("GNORACLE_KEY_HOME", ""), "gnokey keybase directory")
 	fs.StringVar(&c.key, "key", env("GNORACLE_KEY", ""), "key name or address")
 	fs.StringVar(&c.passwordFile, "password-file", env("GNORACLE_PASSWORD_FILE", ""), "file holding the key password (else $GNORACLE_KEY_PASSWORD)")
@@ -107,6 +108,9 @@ func main() {
 	}
 	if c.kourt == "" {
 		c.kourt = "gno.land/r/" + c.ns + "/gnoracle/kourt"
+	}
+	if c.token == "" {
+		c.token = "gno.land/r/" + c.ns + "/gnoracle/token"
 	}
 	args := fs.Args()
 	if len(args) == 0 {
@@ -505,6 +509,20 @@ func (c *cli) run(cmd string, a []string) error {
 		if err := need(a, 1, "stake <pyth>"); err != nil {
 			return err
 		}
+		// the DAO pulls the tokens, so it must be approved on the token first
+		if err := c.connect(false); err != nil {
+			return err
+		}
+		head, err := c.client.DAONow(c.dao)
+		if err != nil {
+			return err
+		}
+		if head.Address == "" {
+			return errors.New("the DAO view does not report its address; approve it on the token by hand")
+		}
+		if err := c.tx(c.token, "Approve", head.Address, pyth(a[0])); err != nil {
+			return fmt.Errorf("approve: %w", err)
+		}
 		return c.tx(c.dao, "Stake", pyth(a[0]))
 	case "unstake":
 		if err := need(a, 1, "unstake <pyth>"); err != nil {
@@ -535,7 +553,7 @@ func (c *cli) run(cmd string, a []string) error {
 		if err := need(a, 2, "vote <proposal> <yes|no|abstain>"); err != nil {
 			return err
 		}
-		return c.tx(c.dao, "Vote", a[0], strings.ToLower(a[1]))
+		return c.tx(c.dao, "Vote", a[0], strings.ToUpper(a[1])) // the realm accepts YES, NO, ABSTAIN
 	case "execute":
 		if err := need(a, 1, "execute <proposal>"); err != nil {
 			return err
@@ -646,25 +664,32 @@ func (c *cli) commit(a []string) error {
 	}
 	path := filepath.Join(dir, fmt.Sprintf("%s-%d-%d.json", c.chain, dispute, bl.Round))
 	var rec voteRecord
-	if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &rec) == nil && rec.Salt != "" {
-		if rec.Choice != choice {
-			return fmt.Errorf("%s already holds a commitment for %s; a commitment cannot be changed on chain", path, rec.Choice)
-		}
+	if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &rec) == nil && rec.Salt != "" && rec.Choice == choice {
+		// the same choice again: the same commitment (the realm overwrites in place)
 		fmt.Println("re-using the saved salt from", path)
-	} else {
-		salt, err := gnochain.NewSalt()
-		if err != nil {
-			return err
-		}
-		rec = voteRecord{Chain: c.chain, Dispute: dispute, Round: bl.Round, Seq: bl.Seq, Voter: c.client.Bech32(), Choice: choice, Salt: salt, At: time.Now().UTC().Format(time.RFC3339)}
-		rec.Commitment = gnochain.Commitment(dispute, int(bl.Round), choice, salt, rec.Voter)
-		b, _ := json.MarshalIndent(rec, "", "  ")
-		if err := os.WriteFile(path, b, 0o600); err != nil {
-			return err
-		}
+		fmt.Printf("commitment %s\nsalt kept in %s — keep this file until you reveal (reveal opens at %d, closes at %d)\n", rec.Commitment, path, bl.CommitEnds, bl.RevealEnds)
+		return c.tx(c.dao, "CommitVote", strconv.FormatUint(dispute, 10), rec.Commitment)
+	}
+	// a first commitment, or a changed choice: a fresh salt. The new record is
+	// written beside the old one and replaces it only once the transaction
+	// committed, so a failed change never loses the salt that is on chain.
+	salt, err := gnochain.NewSalt()
+	if err != nil {
+		return err
+	}
+	rec = voteRecord{Chain: c.chain, Dispute: dispute, Round: bl.Round, Seq: bl.Seq, Voter: c.client.Bech32(), Choice: choice, Salt: salt, At: time.Now().UTC().Format(time.RFC3339)}
+	rec.Commitment = gnochain.Commitment(dispute, int(bl.Round), choice, salt, rec.Voter)
+	b, _ := json.MarshalIndent(rec, "", "  ")
+	pending := path + ".pending"
+	if err := os.WriteFile(pending, b, 0o600); err != nil {
+		return err
 	}
 	fmt.Printf("commitment %s\nsalt kept in %s — keep this file until you reveal (reveal opens at %d, closes at %d)\n", rec.Commitment, path, bl.CommitEnds, bl.RevealEnds)
-	return c.tx(c.dao, "CommitVote", strconv.FormatUint(dispute, 10), rec.Commitment)
+	if err := c.tx(c.dao, "CommitVote", strconv.FormatUint(dispute, 10), rec.Commitment); err != nil {
+		_ = os.Remove(pending)
+		return err
+	}
+	return os.Rename(pending, path)
 }
 
 func (c *cli) reveal(a []string) error {

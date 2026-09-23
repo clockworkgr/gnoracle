@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gnolang/gno/gno.land/pkg/gnoclient"
@@ -73,6 +74,7 @@ func (g *GasConfig) Defaults() {
 
 // Client talks to one chain, signing as one key when configured.
 type Client struct {
+	mu     sync.Mutex // one transaction at a time per key: sequences are read from the chain
 	cfg    Config
 	rpc    *rpcclient.RPCClient
 	gc     *gnoclient.Client
@@ -223,6 +225,8 @@ func (c *Client) broadcast(ctx context.Context, memo string, extraGas int64, bui
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	acc, _, err := c.gc.QueryAccount(c.Address())
 	if err != nil {
 		return nil, fmt.Errorf("gnochain: query account %s: %w", c.Bech32(), err)
@@ -240,12 +244,10 @@ func (c *Client) broadcast(ctx context.Context, memo string, extraGas int64, bui
 		if err != nil {
 			return nil, fmt.Errorf("simulate: %w", err)
 		}
-		// the margin or the caller's headroom, whichever is larger: a call
-		// whose simulation already ran the expensive path needs no headroom
+		// the caller's headroom covers work the simulation did not see; the
+		// margin covers the ordinary variance on top of it
+		used += extraGas
 		gasWanted = used + used*c.cfg.Gas.MarginBps/10_000
-		if used+extraGas > gasWanted {
-			gasWanted = used + extraGas
-		}
 		if gasWanted > c.cfg.Gas.Wanted {
 			gasWanted = c.cfg.Gas.Wanted
 		}
@@ -261,6 +263,9 @@ func (c *Client) broadcast(ctx context.Context, memo string, extraGas int64, bui
 	}
 	res, err := c.gc.BroadcastTxCommit(signed)
 	if err != nil {
+		if strings.Contains(err.Error(), "signature verification failed") {
+			return nil, fmt.Errorf("sequence mismatch: another transaction from this key was included first; retry: %w", err)
+		}
 		return nil, fmt.Errorf("broadcast: %w", err)
 	}
 	if res.CheckTx.Error != nil {

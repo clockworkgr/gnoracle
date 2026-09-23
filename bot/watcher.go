@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -22,6 +23,10 @@ func (b *Bot) scan(ctx context.Context) error {
 		}
 		b.state.Height = start - 1
 	}
+	if head < b.state.Height {
+		log.Printf("chain head %d is below the saved cursor %d (a new chain?); rescanning from the head", head, b.state.Height)
+		b.state.Height = head - 1
+	}
 	to := head
 	if to-b.state.Height > int64(b.cfg.MaxBlocks) {
 		to = b.state.Height + int64(b.cfg.MaxBlocks)
@@ -38,7 +43,7 @@ func (b *Bot) scan(ctx context.Context) error {
 			if !b.p.events[ev.Type] {
 				continue
 			}
-			if !b.state.once(fmt.Sprintf("ev:%d:%d:%s:%s", ev.Height, ev.TxIndex, ev.Type, ev.Attr("dispute")+ev.Attr("feed")+ev.Attr("id")+ev.Attr("path"))) {
+			if !b.state.once(fmt.Sprintf("ev:%d:%d:%d:%s", ev.Height, ev.TxIndex, ev.Index, ev.Type)) {
 				continue
 			}
 			b.post(ctx, b.format(ev))

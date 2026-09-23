@@ -107,6 +107,7 @@ func (c *Client) BlockTime(ctx context.Context, height int64) (time.Time, int, e
 type Event struct {
 	Height  int64
 	TxIndex int
+	Index   int // ordinal within the transaction
 	Type    string
 	PkgPath string
 	Attrs   map[string]string
@@ -147,7 +148,7 @@ func (c *Client) BlockEvents(ctx context.Context, height int64, pkgs map[string]
 		if len(tx.ResponseBase.Error) > 0 && string(tx.ResponseBase.Error) != "null" {
 			continue // a failed transaction's events were rolled back
 		}
-		for _, raw := range tx.ResponseBase.Events {
+		for n, raw := range tx.ResponseBase.Events {
 			var ev struct {
 				Kind    string `json:"@type"`
 				Type    string `json:"type"`
@@ -163,7 +164,7 @@ func (c *Client) BlockEvents(ctx context.Context, height int64, pkgs map[string]
 			if pkgs != nil && !pkgs[ev.PkgPath] {
 				continue
 			}
-			e := Event{Height: height, TxIndex: i, Type: ev.Type, PkgPath: ev.PkgPath, Attrs: map[string]string{}}
+			e := Event{Height: height, TxIndex: i, Index: n, Type: ev.Type, PkgPath: ev.PkgPath, Attrs: map[string]string{}}
 			for _, a := range ev.Attrs {
 				e.Attrs[a.Key] = a.Value
 				e.Order = append(e.Order, a.Key)

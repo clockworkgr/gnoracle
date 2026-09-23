@@ -124,8 +124,8 @@ func (c *Config) Validate() error {
 	if c.Poll == "" {
 		c.Poll = "5s"
 	}
-	if _, err := time.ParseDuration(c.Poll); err != nil {
-		return fmt.Errorf("poll: %w", err)
+	if d, err := time.ParseDuration(c.Poll); err != nil || d <= 0 {
+		return fmt.Errorf("poll must be a positive duration: %q", c.Poll)
 	}
 	if c.State == "" {
 		c.State = "agent-state.json"
@@ -212,6 +212,9 @@ func (f *FeedConfig) runtime() (*feedParams, error) {
 			return nil, fmt.Errorf("source.timeout: %w", err)
 		}
 	}
+	if p.jitter < 0 || p.finalizeDelay < 0 || p.claimEvery < 0 || p.timeout <= 0 {
+		return nil, errors.New("jitter, finalize_delay and claim_every must not be negative and source.timeout must be positive")
+	}
 	if err := f.Source.validate(); err != nil {
 		return nil, err
 	}
@@ -230,6 +233,13 @@ func (s *SourceConfig) validate() error {
 		if s.Scale != "" {
 			if _, err := parseRat(s.Scale); err != nil {
 				return fmt.Errorf("source.scale: %w", err)
+			}
+		}
+		for k, v := range s.Headers {
+			for _, name := range envRefs(v) {
+				if _, ok := os.LookupEnv(name); !ok {
+					return fmt.Errorf("source.headers[%s] refers to $%s, which is not set", k, name)
+				}
 			}
 		}
 	case "exec":
@@ -262,4 +272,28 @@ func parseRat(s string) (*big.Rat, error) {
 		return nil, fmt.Errorf("%q is not a decimal number", s)
 	}
 	return r, nil
+}
+
+// envRefs lists the $VAR and ${VAR} names a header value expands.
+func envRefs(v string) []string {
+	var out []string
+	for i := 0; i < len(v); i++ {
+		if v[i] != '$' {
+			continue
+		}
+		j := i + 1
+		braced := j < len(v) && v[j] == '{'
+		if braced {
+			j++
+		}
+		k := j
+		for k < len(v) && (v[k] == '_' || v[k] >= 'A' && v[k] <= 'Z' || v[k] >= 'a' && v[k] <= 'z' || v[k] >= '0' && v[k] <= '9') {
+			k++
+		}
+		if k > j {
+			out = append(out, v[j:k])
+		}
+		i = k
+	}
+	return out
 }

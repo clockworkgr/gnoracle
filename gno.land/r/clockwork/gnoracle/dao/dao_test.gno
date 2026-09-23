@@ -399,6 +399,39 @@ func TestTreasuryMintAndSelfUpgrade(cur realm, t *testing.T) {
 	health(t)
 }
 
+// TestTreasuryUgnotAndDepositsStayAccounted pins the ugnot ledger: a proposal
+// deposit is escrow, not fee income, and a treasury payout leaves no phantom
+// coins for the next sync to hand to stakers.
+func TestTreasuryUgnotAndDepositsStayAccounted(cur realm, t *testing.T) {
+	install(cur)
+	epoch()
+	treasuryBefore := dao.TreasuryUgnot()
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	payDAO(20 * gnot)
+	dao.Propose(cross(cur), "text", "accounting check", "Deposit is escrow")
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	uassert.Equal(t, int64(0), dao.SyncFees(cross(cur))) // the deposit is not income
+	uassert.Equal(t, treasuryBefore, dao.TreasuryUgnot())
+	health(t)
+
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	tp := dao.Propose(cross(cur), "treasury", "ugnot 10000000 "+string(carol)+" grant", "Grant 10 GNOT")
+	dao.Vote(cross(cur), tp, "YES")
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	dao.Vote(cross(cur), tp, "YES")
+	skip(7*day + 5)
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	before := dao.TreasuryUgnot()
+	dao.Execute(cross(cur), tp)
+	uassert.Equal(t, before-10*gnot, dao.TreasuryUgnot())
+	uassert.Equal(t, int64(0), dao.SyncFees(cross(cur))) // no phantom income after the payout
+	health(t)
+}
+
 func TestGates(cur realm, t *testing.T) {
 	install(cur)
 	testing.SetRealm(testing.NewCodeRealm("gno.land/r/demo/intruder"))

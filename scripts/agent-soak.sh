@@ -17,7 +17,7 @@ cd "$here"
 export GNOKEY_HOME="$here/.dev-keys"
 export GNOKEY_PASSWORD="${GNOKEY_PASSWORD:-devpassword}"
 export GNORACLE_KEY_PASSWORD="$GNOKEY_PASSWORD"
-GNOKEY="${GNOKEY:-$HOME/.cache/gno-toolchains/v1.2.0/gnokey}"
+GNOKEY="${GNOKEY:-$HOME/.cache/gno-toolchains/${GNO_REF:-v1.2.0}/gnokey}"
 export GNOKEY
 # shellcheck source=env.sh
 . "$here/scripts/env.sh"
@@ -105,8 +105,13 @@ done
 sed -e "s#^remote.*#remote = \"$REMOTE\"#" -e "s#^chain_id.*#chain_id = \"$CHAINID\"#" -e "s#^key_home.*#key_home = \"$GNOKEY_HOME\"#" -e "s#^state.*#state = \"$OUT/bot-state.json\"#" configs/bot.dev.toml > "$OUT/bot.toml"
 
 step "running ${#KEYS[@]} agents and the bot for ${DURATION}s"
+if lsof -nP -iTCP:"$PRICE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  fail "port $PRICE_PORT is in use; set PRICE_PORT to a free one"
+fi
+PIDS=()
+trap 'kill "${PIDS[@]}" 2>/dev/null || true' EXIT   # armed before anything starts
 (cd "$OUT/www" && exec python3 -m http.server "$PRICE_PORT" --bind 127.0.0.1 >"$OUT/www.log" 2>&1) &
-PIDS=($!)
+PIDS+=($!)
 sleep 1
 for name in "${KEYS[@]}"; do
   bin/gnoracle-agent -config "$OUT/$name.toml" > "$OUT/$name.log" 2>&1 &
@@ -114,7 +119,6 @@ for name in "${KEYS[@]}"; do
 done
 bin/gnoracle-bot -config "$OUT/bot.toml" > "$OUT/bot.log" 2>&1 &
 PIDS+=($!)
-trap 'kill "${PIDS[@]}" 2>/dev/null || true' EXIT
 sleep "$DURATION"
 kill "${PIDS[@]}" 2>/dev/null || true
 trap - EXIT

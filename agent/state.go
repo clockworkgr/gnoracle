@@ -12,6 +12,7 @@ import (
 // FeedState is what the agent remembers about one feed between ticks and
 // restarts, so a restart never double-submits or forgets its own last value.
 type FeedState struct {
+	StartAt     int64  `json:"startAt"` // the schedule the rounds below belong to; a change resets them
 	HasRound    bool   `json:"hasRound"`
 	LastRound   uint64 `json:"lastRound"`
 	HasValue    bool   `json:"hasValue"`
@@ -24,6 +25,7 @@ type FeedState struct {
 type State struct {
 	mu    sync.Mutex
 	path  string
+	Chain string                `json:"chain"` // chain id the state belongs to
 	Feeds map[string]*FeedState `json:"feeds"`
 }
 
@@ -55,6 +57,40 @@ func (s *State) Feed(id uint64) *FeedState {
 		s.Feeds[k] = &FeedState{}
 	}
 	return s.Feeds[k]
+}
+
+// Update mutates one feed's state under the lock (runners share the file).
+func (s *State) Update(id uint64, fn func(*FeedState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := strconv.FormatUint(id, 10)
+	if s.Feeds[k] == nil {
+		s.Feeds[k] = &FeedState{}
+	}
+	fn(s.Feeds[k])
+}
+
+// Snapshot returns a copy of one feed's state.
+func (s *State) Snapshot(id uint64) FeedState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fs := s.Feeds[strconv.FormatUint(id, 10)]; fs != nil {
+		return *fs
+	}
+	return FeedState{}
+}
+
+// ForChain forgets everything when the chain id differs from the recorded
+// one and records the current id.
+func (s *State) ForChain(chainID string) (reset bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Chain != "" && s.Chain != chainID {
+		s.Feeds = map[string]*FeedState{}
+		reset = true
+	}
+	s.Chain = chainID
+	return reset
 }
 
 // Save writes the state atomically.

@@ -11,7 +11,7 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 export NS="${DEV_NS:-clockwork}"
 export REMOTE="${REMOTE:-http://127.0.0.1:26657}"
 export CHAINID="${CHAINID:-dev}"
-export GNOKEY="${GNOKEY:-$HOME/.cache/gno-toolchains/v1.2.0/gnokey}"
+export GNOKEY="${GNOKEY:-$HOME/.cache/gno-toolchains/${GNO_REF:-v1.2.0}/gnokey}"
 export GNOKEY_HOME="${GNOKEY_HOME:-$here/.dev-keys}"
 export GNOKEY_PASSWORD="${GNOKEY_PASSWORD:-devpassword}"
 export KEY="${KEY:-test1}"
@@ -55,7 +55,7 @@ if [ "$(qeval "$CORE.LivePath()")" != "(\"$IMPL\" string)" ]; then
 fi
 
 step "fund prov2 with 3000 GNOT"
-KEY=test1 tx send -to "$PROV2" -send 3000000000ugnot -gas-fee 1000000ugnot -gas-wanted 2000000
+KEY=test1 tx send -to "$PROV2" -send 3000000000ugnot -gas-fee 2000ugnot -gas-wanted 2000000
 
 step "lower the stake floor for the demo (rate limit: several steps)"
 FLOOR="$(qeval "$CORE.Param(\"providerMinStakeFloor\")" | grep -oE '[0-9]+' | head -1)"
@@ -83,8 +83,10 @@ step "wait for round 0 to open"
 # chain time lags the wall clock until transactions flow: send cheap ticks
 # until the realm's own clock has passed the round's open time.
 START="$(qeval "$CORE.GetFeed($FEED).StartAt" | grep -oE '[0-9]+' | head -1)"
-tick() { KEY=test1 tx send -to "$TEST1" -send 1ugnot -gas-fee 1000000ugnot -gas-wanted 2000000 >/dev/null 2>&1 || true; }
+tick() { KEY=test1 tx send -to "$TEST1" -send 1ugnot -gas-fee 2000ugnot -gas-wanted 2000000 >/dev/null 2>&1 || true; }
+deadline=$((SECONDS + ${WAIT_TIMEOUT:-900}))
 while :; do
+  [ "$SECONDS" -lt "$deadline" ] || { echo "chain-test: timed out waiting for the chain (WAIT_TIMEOUT=${WAIT_TIMEOUT:-900}s)" >&2; exit 1; }
   NOW="$(qeval "$CORE.Now()" | grep -oE '[0-9]+' | head -1)"
   [ "$NOW" -ge "$((START + 1))" ] && break
   sleep 2; tick; sleep 1; tick
@@ -96,7 +98,9 @@ plain_call test1 Submit "$FEED" 0 1000000
 plain_call prov2 Submit "$FEED" 0 1004000
 
 step "round 1: measure the marginal storage of one more round"
+deadline=$((SECONDS + ${WAIT_TIMEOUT:-900}))
 while :; do
+  [ "$SECONDS" -lt "$deadline" ] || { echo "chain-test: timed out waiting for the chain (WAIT_TIMEOUT=${WAIT_TIMEOUT:-900}s)" >&2; exit 1; }
   NOW="$(qeval "$CORE.Now()" | grep -oE '[0-9]+' | head -1)"
   [ "$NOW" -ge "$((START + 61))" ] && break
   sleep 2; tick; sleep 1; tick
@@ -122,7 +126,6 @@ KEY=test1 tx call -pkgpath "$TOKEN" -func Approve -args "$DAOADDR" -args 1000000
 KEY=test1 tx call -pkgpath "$DAO" -func Stake -args 1000000000000 -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
 echo "staked: $(qeval "$DAO.TotalStaked()")"
 step "forward the core's pending fees to the DAO and sync them"
-KEY=test1 tx call -pkgpath "$CORE" -func SetParamStr -args daoRealm -args "$DAO" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot || true
 KEY=test1 tx call -pkgpath "$CORE" -func ForwardFees -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
 KEY=test1 tx call -pkgpath "$DAO" -func SyncFees -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
 echo "fees owed to test1: $(qeval "$DAO.FeesOwed(\"$TEST1\")")"

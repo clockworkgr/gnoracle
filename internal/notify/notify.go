@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -52,12 +54,13 @@ func (t *Telegram) Send(ctx context.Context, chatID int64, text string) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := t.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram: %w", err)
+		// a transport error quotes the URL, which carries the token
+		return errors.New("telegram: " + strings.ReplaceAll(err.Error(), t.Token, "***"))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
-		return fmt.Errorf("telegram: %s: %s", resp.Status, b)
+		return fmt.Errorf("telegram: %s: %s", resp.Status, strings.ReplaceAll(string(b), t.Token, "***"))
 	}
 	return nil
 }

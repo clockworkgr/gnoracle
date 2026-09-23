@@ -102,7 +102,7 @@ func (a *httpAdapter) Fetch(ctx context.Context) []Sample {
 }
 
 func (a *httpAdapter) one(ctx context.Context, u string) Sample {
-	s := Sample{Source: u}
+	s := Sample{Source: redactURL(u)} // the journal must not keep API keys from query strings
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		s.Err = err.Error()
@@ -354,4 +354,17 @@ func (a *qevalAdapter) Fetch(context.Context) []Sample {
 	s.Num = n
 	s.finish()
 	return []Sample{s}
+}
+
+// redactURL drops the query string and user info from a URL for logs.
+func redactURL(raw string) string {
+	if i := strings.IndexByte(raw, '?'); i >= 0 {
+		raw = raw[:i] + "?…"
+	}
+	if at := strings.IndexByte(raw, '@'); at >= 0 {
+		if scheme := strings.Index(raw, "://"); scheme >= 0 && at > scheme {
+			raw = raw[:scheme+3] + "…@" + raw[at+1:]
+		}
+	}
+	return raw
 }

@@ -11,3 +11,8 @@
 /.dev-agent/
 # repo-local gno download cache (see Makefile)
 /.gnohome/
+# operator configuration and secrets created from the examples (OPERATIONS.md)
+/agent.toml
+/bot.toml
+password*
+*.password

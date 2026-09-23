@@ -51,7 +51,11 @@ func (b *Bot) remind(ctx context.Context) error {
 			msg += " Absence costs stake (UMA-style penalties)."
 			b.post(ctx, msg)
 			for _, m := range missing {
-				b.dm(ctx, m, fmt.Sprintf("You have not %sed on dispute %d yet. The %s phase ends %s. Run `gnoracle %s %d ...`.", verb+"t", bl.Dispute, verb, when(deadline, now), verb, bl.Dispute))
+				done := "committed"
+				if verb == "reveal" {
+					done = "revealed"
+				}
+				b.dm(ctx, m, fmt.Sprintf("You have not %s on dispute %d yet. The %s phase ends %s. Run `gnoracle %s %d ...`.", done, bl.Dispute, verb, when(deadline, now), verb, bl.Dispute))
 			}
 			break // one reminder per pass: the tightest threshold
 		}

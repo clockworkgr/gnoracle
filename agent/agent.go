@@ -38,6 +38,9 @@ func New(cfg *Config, client *gnochain.Client) (*Agent, error) {
 		return nil, fmt.Errorf("agent: state: %w", err)
 	}
 	poll, _ := time.ParseDuration(cfg.Poll)
+	if state.ForChain(cfg.ChainID) {
+		log.Printf("agent: state file was for another chain; starting fresh")
+	}
 	a := &Agent{cfg: cfg, client: client, notifier: notify.New(cfg.Notify.TelegramToken, false), state: state, journal: NewJournal(cfg.Journal), poll: poll}
 	for i := range cfg.Feeds {
 		fc := cfg.Feeds[i]
@@ -210,11 +213,21 @@ func (r *feedRunner) tick(ctx context.Context) error {
 		from := p.ObligedFrom
 		r.obliged, r.slot = &from, slot
 	}
-	st := r.a.state.Feed(r.fc.ID)
+	// a new schedule (a reopened one-off, a re-created dev chain) makes the
+	// remembered rounds meaningless
+	r.a.state.Update(r.fc.ID, func(fs *FeedState) {
+		if fs.StartAt != f.StartAt {
+			if fs.StartAt != 0 {
+				r.log.Printf("schedule changed (start %d -> %d); forgetting remembered rounds", fs.StartAt, f.StartAt)
+			}
+			fs.StartAt, fs.HasRound, fs.LastRound, fs.HasValue, fs.LastValue = f.StartAt, false, 0, false, 0
+		}
+	})
+	st := r.a.state.Snapshot(r.fc.ID)
 	if cur < *r.obliged {
 		r.warnOnce("obliged", fmt.Sprintf("obligations start at round %d (current %d); waiting", *r.obliged, cur))
 		if !r.fc.SkipFinalize {
-			if err := r.crank(ctx, f, sched, cur, now); err != nil {
+			if err := r.crank(ctx, f, sched, cur, now, slot); err != nil {
 				r.log.Printf("crank: %v", err)
 			}
 		}
@@ -225,7 +238,7 @@ func (r *feedRunner) tick(ctx context.Context) error {
 	//    once closed) so the feed keeps moving and the tip is ours
 	submittedNow := false
 	if !r.fc.SkipFinalize {
-		if err := r.crank(ctx, f, sched, cur, now); err != nil {
+		if err := r.crank(ctx, f, sched, cur, now, slot); err != nil {
 			r.log.Printf("crank: %v", err)
 		}
 	}
@@ -234,29 +247,34 @@ func (r *feedRunner) tick(ctx context.Context) error {
 	if !(st.HasRound && st.LastRound >= cur) {
 		openAt, closeAt := sched.OpenAt(cur), sched.CloseAt(cur)
 		jitter := int64(r.p.jitter / time.Second)
-		if now >= openAt+jitter && now < closeAt {
+		// a submission assembled in the last seconds lands after the close
+		margin := int64(r.p.timeout/time.Second) + 2
+		if now >= openAt+jitter && now < closeAt-margin {
 			rd, err := r.a.client.Round(core, r.fc.ID, cur)
-			if err == nil && rd.HasSubmitted(slot) {
-				st.HasRound, st.LastRound = true, cur
+			switch {
+			case err != nil:
+				// never submit blind: the mask is the only double-submission guard
+				r.log.Printf("round %d: cannot read the round yet: %v", cur, err)
+			case rd.HasSubmitted(slot):
+				r.a.state.Update(r.fc.ID, func(fs *FeedState) { fs.HasRound, fs.LastRound = true, cur })
 				_ = r.a.state.Save()
-			} else {
+			default:
 				// headroom only when exactly one other provider is still to
 				// submit: then a race can make this call the finalising one
 				// after the simulation measured a plain submission
-				others := int(f.ActiveCount) - 1
-				if err == nil {
-					others -= len(rd.Submitted)
-				}
+				others := int(f.ActiveCount) - 1 - len(rd.Submitted)
 				var headroom int64
 				if others == 1 {
 					headroom = submitFinaliseHeadroom
 				}
-				if err := r.submit(ctx, f, cur, st, headroom); err != nil {
+				if err := r.submit(ctx, f, cur, &st, headroom); err != nil {
 					r.log.Printf("round %d: %v", cur, err)
 				} else {
 					submittedNow = true
 				}
 			}
+		} else if now >= closeAt-margin && now < closeAt {
+			r.warnOnce("late-"+u(cur), fmt.Sprintf("round %d: too close to the window's end to submit safely", cur))
 		}
 	}
 	_ = submittedNow
@@ -264,26 +282,32 @@ func (r *feedRunner) tick(ctx context.Context) error {
 	// 3. claim rewards on the cadence
 	if r.p.claimEvery > 0 && now-st.LastClaimAt >= int64(r.p.claimEvery/time.Second) {
 		p, err := r.a.client.Provider(core, r.fc.ID, me)
-		if err == nil && p.Rewards >= r.p.claimMin {
-			res, err := r.a.client.Call(ctx, core, "ClaimRewards", gnochain.CallOpts{}, u(r.fc.ID))
-			if err != nil {
-				r.log.Printf("claim: %v", err)
-				r.a.journal.Write(Entry{Feed: r.fc.ID, Kind: "error", Text: "claim", Err: err.Error()})
-			} else {
-				paid, _ := gnochain.Int64Result(res.Data)
-				r.log.Printf("claimed %s ugnot (tx %s)", i(paid), res.Hash)
-				r.a.journal.Write(Entry{Feed: r.fc.ID, Kind: "claim", Value: &paid, Tx: res.Hash, GasUsed: res.GasUsed, Fee: res.Fee})
+		if err == nil {
+			claimed := true
+			if p.Rewards >= r.p.claimMin {
+				res, err := r.a.client.Call(ctx, core, "ClaimRewards", gnochain.CallOpts{}, u(r.fc.ID))
+				if err != nil {
+					claimed = false
+					r.log.Printf("claim: %v", err)
+					r.a.journal.Write(Entry{Feed: r.fc.ID, Kind: "error", Text: "claim", Err: err.Error()})
+				} else {
+					paid, _ := gnochain.Int64Result(res.Data)
+					r.log.Printf("claimed %s ugnot (tx %s)", i(paid), res.Hash)
+					r.a.journal.Write(Entry{Feed: r.fc.ID, Kind: "claim", Value: &paid, Tx: res.Hash, GasUsed: res.GasUsed, Fee: res.Fee})
+				}
+			}
+			if claimed {
+				r.a.state.Update(r.fc.ID, func(fs *FeedState) { fs.LastClaimAt = now })
+				_ = r.a.state.Save()
 			}
 		}
-		st.LastClaimAt = now
-		_ = r.a.state.Save()
 	}
 	return nil
 }
 
 // crank calls CatchUp when a closed round waits for finalisation. The batch
 // size adapts: an out-of-gas simulation halves it, success grows it back.
-func (r *feedRunner) crank(ctx context.Context, f *gnochain.FeedInfo, sched gnochain.Schedule, cur uint64, now int64) error {
+func (r *feedRunner) crank(ctx context.Context, f *gnochain.FeedInfo, sched gnochain.Schedule, cur uint64, now int64, slot int) error {
 	if time.Now().Before(r.backoff) {
 		return nil
 	}
@@ -291,8 +315,17 @@ func (r *feedRunner) crank(ctx context.Context, f *gnochain.FeedInfo, sched gnoc
 	if sched.IsOneOff() && next != 0 {
 		return nil
 	}
-	if next > cur || now < sched.CloseAt(next)+int64(r.p.finalizeDelay/time.Second) {
+	// agents on the same feed stagger by slot so only one usually pays for a
+	// CatchUp that another already did (a lost race costs the full fee)
+	delay := int64(r.p.finalizeDelay/time.Second) + int64(slot)*2
+	if next > cur || now < sched.CloseAt(next)+delay {
 		return nil
+	}
+	// re-read right before spending: another agent may have finalised
+	if fresh, err := r.a.client.Feed(r.a.cfg.Core, r.fc.ID); err == nil {
+		if sched.Next(fresh.LastFinalized, fresh.HaveLast) != next {
+			return nil
+		}
 	}
 	if next == cur || !r.p.catchUpEmpty {
 		rd, err := r.a.client.Round(r.a.cfg.Core, r.fc.ID, next)
@@ -389,15 +422,15 @@ func (r *feedRunner) submit(ctx context.Context, f *gnochain.FeedInfo, round uin
 	// headroom rather than pay for a failed transaction.
 	res, err := r.a.client.Call(ctx, r.a.cfg.Core, "Submit", gnochain.CallOpts{ExtraGas: headroom}, u(r.fc.ID), u(round), i(value))
 	if err != nil {
-		if strings.Contains(err.Error(), "already submitted") {
-			st.HasRound, st.LastRound = true, round
-			_ = r.a.state.Save()
-			return nil
+		if strings.Contains(err.Error(), "obligations start at round") {
+			r.obliged = nil // re-read the provider record next tick
 		}
 		r.a.journal.Write(Entry{Feed: r.fc.ID, Round: round, Kind: "error", Text: "submit", Value: &value, Err: err.Error()})
 		return fmt.Errorf("submit: %w", err)
 	}
-	st.HasRound, st.LastRound, st.HasValue, st.LastValue, st.LastTxHash = true, round, true, value, res.Hash
+	r.a.state.Update(r.fc.ID, func(fs *FeedState) {
+		fs.HasRound, fs.LastRound, fs.HasValue, fs.LastValue, fs.LastTxHash = true, round, true, value, res.Hash
+	})
 	_ = r.a.state.Save()
 	r.log.Printf("round %d: submitted %s (tx %s, gas %d, fee %s)", round, FormatScaled(value, f.Spec.Decimals), res.Hash, res.GasUsed, res.Fee)
 	r.a.journal.Write(Entry{Feed: r.fc.ID, Round: round, Kind: "submit", Value: &value, Tx: res.Hash, GasUsed: res.GasUsed, Fee: res.Fee})

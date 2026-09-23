@@ -23,7 +23,11 @@ addr_ns="g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm"
 own_p="gno.land/p/clockwork/gnoracle/"   # packages of this workspace: never fetched
 own_r="gno.land/r/clockwork/gnoracle/"
 
-[ "${FORCE:-}" = 1 ] && rm -rf "$here/deps"
+if [ "${FORCE:-}" = 1 ] && [ -d "$here/deps" ]; then
+  # keep the old mirror until the new one is complete
+  rm -rf "$here/deps.old"; mv "$here/deps" "$here/deps.old"
+  trap 'if [ -d "$here/deps.old" ]; then rm -rf "$here/deps"; mv "$here/deps.old" "$here/deps"; echo "deps: refetch failed; previous mirror restored" >&2; fi' EXIT
+fi
 
 # qfile prints a package's file list or a file's content; a failed query
 # (unknown package, unreachable remote) prints the node's message and fails.
@@ -44,19 +48,24 @@ fetch_pkg() {
     echo "deps: $src is not on $source_remote" >&2
     return 1
   fi
-  mkdir -p "$d"
+  # fetch into a temporary directory and move it into place only when every
+  # file arrived, so an interrupted run never leaves a half package that a
+  # later run takes for complete
+  local tmp="$d.tmp"
+  rm -rf "$tmp"; mkdir -p "$tmp"
   for f in $files; do
     case "$f" in
       *_test.gno|*_filetest.gno) continue ;;
-      *.gno|gnomod.toml|README.md) qfile "$src/$f" > "$d/$f" ;;
+      *.gno|gnomod.toml|README.md) qfile "$src/$f" > "$tmp/$f" ;;
     esac
   done
   if [ "$src" != "$p" ]; then
     # portable in-place rewrite (BSD and GNU sed disagree on -i)
-    for f in "$d"/*.gno "$d/gnomod.toml"; do
+    for f in "$tmp"/*.gno "$tmp/gnomod.toml"; do
       sed -e "s#$src#$p#g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     done
   fi
+  rm -rf "$d"; mkdir -p "$(dirname "$d")"; mv "$tmp" "$d"
   echo "deps: $p <- $source_remote${2:+ ($2)}"
 }
 
@@ -92,4 +101,5 @@ while [ "$changed" = 1 ]; do
     changed=1
   done
 done
+rm -rf "$here/deps.old"; trap - EXIT
 echo "deps: up to date ($(find "$here/deps" -name gnomod.toml 2>/dev/null | wc -l | tr -d ' ') packages)"

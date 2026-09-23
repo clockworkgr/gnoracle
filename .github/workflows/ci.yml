@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   go:
     name: Go tools
@@ -37,7 +40,9 @@ jobs:
           path: |
             ~/.cache/gno-toolchains
             deps
-          key: gno-v1.2.0-${{ hashFiles('Makefile', 'scripts/deps.sh') }}
+          key: gno-v1.2.0-${{ hashFiles('Makefile', 'scripts/deps.sh', 'gno.land/**/*.gno') }}
+          restore-keys: |
+            gno-v1.2.0-
       - run: make toolchain
       - run: make deps
       - run: make test
@@ -45,7 +50,7 @@ jobs:
 
   image:
     name: Container image
-    needs: [go]
+    needs: [go, gno]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

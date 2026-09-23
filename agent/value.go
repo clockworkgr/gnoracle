@@ -154,10 +154,9 @@ func OptionIndex(options []string, label string, mapping map[string]string) (int
 // else a Label.
 func ParseNumberOrLabel(s *Sample, text string) {
 	t := strings.TrimSpace(text)
+	s.Label = t // an option feed may use a numeric label or an option index
 	if r, ok := new(big.Rat).SetString(t); ok && t != "" {
 		s.Num = r
-	} else {
-		s.Label = t
 	}
 	s.finish()
 }

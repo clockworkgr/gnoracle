@@ -244,6 +244,7 @@ type CoreHealth struct {
 type DAOHead struct {
 	Now           int64  `json:"now"`
 	Height        int64  `json:"height"`
+	Address       string `json:"address"`
 	Epoch         int64  `json:"epoch"`
 	EpochBlocks   int64  `json:"epochBlocks"`
 	Live          string `json:"live"`
@@ -276,6 +277,7 @@ type BallotInfo struct {
 	Tier           string `json:"tier"`
 	ResolvedAt     int64  `json:"resolvedAt"`
 	PrevSeq        uint64 `json:"prevSeq"`
+	Final          bool   `json:"final"`  // the core applied the outcome: settlement may run
 	Exists         *bool  `json:"exists"` // false on json/ballot/dispute/<id> without a ballot
 }
 
@@ -354,10 +356,12 @@ type KourtRecord struct {
 	Now        int64  `json:"now"`
 	Dispute    uint64 `json:"dispute"`
 	Exists     bool   `json:"exists"`
+	Binding    string `json:"binding"`
 	State      string `json:"state"`
 	Claim      uint64 `json:"claim"`
 	Title      string `json:"title"`
 	OpenedAt   int64  `json:"openedAt"`
+	StakedAt   int64  `json:"stakedAt"`
 	AnsweredAt int64  `json:"answeredAt"`
 	SettledAt  int64  `json:"settledAt"`
 	Verdict    int64  `json:"verdict"`
@@ -368,10 +372,23 @@ type KourtRecord struct {
 // Terminal reports whether the mirror needs no more cranking.
 func (r *KourtRecord) Terminal() bool {
 	switch r.State {
-	case "settled", "confirmed", "dissent":
+	case "settled", "confirmed", "dissent", "abandoned":
 		return true
 	}
 	return false
+}
+
+// Due reports whether a crank at chain time now can advance the record:
+// the stand-in and Kourt wait 3 h after filing before an answer and 72 h
+// after the answer before an undisputed settlement.
+func (r *KourtRecord) Due(now int64) bool {
+	switch r.State {
+	case "staked":
+		return now >= r.OpenedAt+3*3600
+	case "answered":
+		return now >= r.AnsweredAt+72*3600
+	}
+	return !r.Terminal()
 }
 
 // ViewError is the realm's {"error": ...} answer.

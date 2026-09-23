@@ -156,8 +156,25 @@ func (c *Config) Validate() error {
 	if c.Crank.Kourt && c.Kourt == "" {
 		return errors.New("crank.kourt needs the kourt realm path")
 	}
-	_, err := c.params()
-	return err
+	if c.Telegram.Token != "" && c.Telegram.Chat == 0 {
+		return errors.New("telegram.token is set but telegram.chat is 0: channel posts would be dropped silently")
+	}
+	p, err := c.params()
+	if err != nil {
+		return err
+	}
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{{"poll", p.poll}, {"remind.every", p.remindEvery}, {"crank.every", p.crankEvery}, {"crank.kourt_every", p.kourtEvery}, {"crank.settle_every", p.settleEvery}} {
+		if d.v <= 0 {
+			return fmt.Errorf("%s must be a positive duration", d.name)
+		}
+	}
+	if p.finalizeGrace < 0 {
+		return errors.New("crank.finalize_grace must not be negative")
+	}
+	return nil
 }
 
 func (c *Config) params() (*params, error) {

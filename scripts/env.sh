@@ -13,17 +13,28 @@ REMOTE="${REMOTE:-http://127.0.0.1:26657}"  # gnodev by default
 CHAINID="${CHAINID:-dev}"
 KEY="${KEY:-test1}"                         # key name or address in the keybase
 GNOKEY="${GNOKEY:-gnokey}"
+# The Makefile exports GNOHOME=<repo>/.gnohome for the gno download cache, and
+# gnokey's default keybase follows GNOHOME too; point at the user's real
+# keybase unless the caller chose one.
+if [ -z "${GNOKEY_HOME:-}" ] && [ -n "${GNOHOME:-}" ]; then
+  GNOKEY_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/gno"
+fi
 GNOKEY_HOME="${GNOKEY_HOME:-}"              # empty: gnokey's default keybase
 
 # Gas. gno.land accepts a fee/gas ratio of 0.001 ugnot/gas or more; these
 # offer 0.002. gas-wanted is a ceiling and a ceiling is not charged, the fee
 # is deducted in full. Storage locks 100ugnot per byte and is refundable, so
 # the deposit ceiling costs nothing.
-CALL_GAS_WANTED="${CALL_GAS_WANTED:-10000000}"
-CALL_GAS_FEE="${CALL_GAS_FEE:-20000ugnot}"
-ADDPKG_GAS_WANTED="${ADDPKG_GAS_WANTED:-120000000}"
-ADDPKG_GAS_FEE="${ADDPKG_GAS_FEE:-240000ugnot}"
-ADDPKG_DEPOSIT="${ADDPKG_DEPOSIT:-20000000ugnot}"
+# Realm calls: ProposeFeed simulates at about 38M gas, Submit at 18M, a
+# finalising Submit at 32M; 60M is a safe ceiling (only the fee is charged).
+CALL_GAS_WANTED="${CALL_GAS_WANTED:-60000000}"
+CALL_GAS_FEE="${CALL_GAS_FEE:-120000ugnot}"
+# addpkg: the permanent core realm simulates at about 152M gas and locks a
+# storage deposit of about 32 GNOT (refundable); the whole set needs roughly
+# 150 GNOT of deposits plus fees on the deployer key.
+ADDPKG_GAS_WANTED="${ADDPKG_GAS_WANTED:-250000000}"
+ADDPKG_GAS_FEE="${ADDPKG_GAS_FEE:-500000ugnot}"
+ADDPKG_MAX_DEPOSIT="${ADDPKG_MAX_DEPOSIT:-${ADDPKG_DEPOSIT:-50000000ugnot}}"
 
 # gk runs gnokey with the keybase location applied.
 gk() {
@@ -54,7 +65,7 @@ tx() {
     printf 'password for %s: ' "$KEY" >&2
     IFS= read -rs GNOKEY_PASSWORD
     printf '\n' >&2
-    export GNOKEY_PASSWORD
+    # kept in this shell only (the pipe below delivers it); never exported
   fi
   if [ -n "${GNOKEY_PASSWORD:-}" ]; then
     printf '%s\n' "$GNOKEY_PASSWORD" |

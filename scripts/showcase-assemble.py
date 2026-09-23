@@ -19,7 +19,9 @@ script:
     cp -r .dev-agent/soak D/run
     (optional) make chain-test > D/chain-test.txt, with its start time in D/chaintest-started.txt
 
-Then `python3 D/showcase-assemble.py` writes the document.
+Then `GNORACLE_REPO=/path/to/gnoracle python3 D/showcase-assemble.py` writes
+docs/AGENT_SOAK_SHOWCASE.md under that repository (without GNORACLE_REPO the
+script assumes it still sits in scripts/ of the repository).
 """
 import json, os, re, glob, subprocess, statistics
 from datetime import datetime, timezone

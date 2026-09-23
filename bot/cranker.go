@@ -150,6 +150,12 @@ func (b *Bot) crankKourt(ctx context.Context) error {
 		if rec.Exists && rec.Terminal() {
 			continue
 		}
+		if rec.Exists && !rec.Due(rec.Now) {
+			continue // the court's clocks have not run yet: a crank would only pay a fee
+		}
+		if rec.Exists && rec.State == "contested" && !b.state.due("kourt-contested:"+u(d.ID), 24*time.Hour) {
+			continue // a contested claim settles by vote on the court's schedule; look daily
+		}
 		res, err := b.client.Call(ctx, b.cfg.Kourt, "Crank", gnochain.CallOpts{}, u(d.ID))
 		if err != nil {
 			log.Printf("kourt crank %d: %v", d.ID, err)
@@ -184,7 +190,7 @@ func (b *Bot) crankSettle(ctx context.Context) {
 			continue
 		}
 		next, err := b.client.Ballot(b.cfg.DAO, mi.Cursor+1)
-		if err != nil || next.ResolvedAt == 0 {
+		if err != nil || !next.Final {
 			continue
 		}
 		res, err := b.client.Call(ctx, b.cfg.DAO, "SettleMember", gnochain.CallOpts{}, m.Addr, "0")
