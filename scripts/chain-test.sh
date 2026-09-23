@@ -108,6 +108,29 @@ step "deposit credit and read"
 send_call test1 DepositFor 1000000ugnot "$TEST1"
 plain_call test1 Read "$FEED"
 
+step "DAO: accept its implementation, stake PYTH, sync fees, open and vote a proposal"
+DAO="gno.land/r/$NS/gnoracle/dao"
+TOKEN="gno.land/r/$NS/gnoracle/token"
+DAOIMPL="$DAO/impl/v1"
+DAOADDR="$(qeval "$DAO.Address()" 2>/dev/null | grep -oE 'g1[0-9a-z]{38}' | head -1)"
+if [ "$(qeval "$DAO.LivePath()")" != "(\"$DAOIMPL\" string)" ]; then
+  KEY=test1 tx call -pkgpath "$DAO" -func Accept -args "$DAOIMPL" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+fi
+echo "dao live: $(qeval "$DAO.LivePath()")"
+echo "test1 PYTH: $(qeval "$TOKEN.BalanceOf(\"$TEST1\")")"
+KEY=test1 tx call -pkgpath "$TOKEN" -func Approve -args "$DAOADDR" -args 1000000000000 -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+KEY=test1 tx call -pkgpath "$DAO" -func Stake -args 1000000000000 -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "staked: $(qeval "$DAO.TotalStaked()")"
+step "forward the core's pending fees to the DAO and sync them"
+KEY=test1 tx call -pkgpath "$CORE" -func SetParamStr -args daoRealm -args "$DAO" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot || true
+KEY=test1 tx call -pkgpath "$CORE" -func ForwardFees -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+KEY=test1 tx call -pkgpath "$DAO" -func SyncFees -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "fees owed to test1: $(qeval "$DAO.FeesOwed(\"$TEST1\")")"
+echo "dao health: $(qeval "$DAO.Health()")"
+step "a text proposal and a vote (voting weight activates next epoch, so this may need ~1h of chain time)"
+KEY=test1 tx call -pkgpath "$DAO" -func Propose -args text -args "hello" -args "First proposal" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "proposals: $(qeval "$DAO.ProposalCount()")"
+
 step "health and page"
 echo "$(qeval "$CORE.Health()")"
 qrender "$CORE" "feed/$FEED" | head -30

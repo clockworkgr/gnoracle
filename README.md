@@ -9,9 +9,10 @@ Status (2026-09-23): plan v0.4; M0 scaffold and M1 pure packages done; M2
 core realm and `impl/v1` implemented with realm tests passing; gnodev smoke
 test in progress. Run `make toolchain && make test`.
 
-Layout: pure packages under `gno.land/p/clockwork/gnoracle/*/v0`, the
-permanent realm at `gno.land/r/clockwork/gnoracle/core` with its first
-implementation at `core/impl/v1`; `make build` rewrites the `clockwork`
+Layout: pure packages under `gno.land/p/clockwork/gnoracle/*/v0`; permanent
+realms `gno.land/r/clockwork/gnoracle/{core,dao,token}` with implementations at
+`core/impl/v1` and `dao/impl/v1` (`impl/v2` are upgrade rehearsals) and the
+`dao/exec` self-upgrade trampoline; `make build` rewrites the `clockwork`
 namespace to the deployer address.
 
 - `docs/IMPLEMENTATION_PLAN.md`: design, tokenomics, security analysis,

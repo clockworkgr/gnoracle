@@ -214,6 +214,12 @@ deploy of the same source under the same address).
   deviation-triggered rounds), which reach state through the same gate.
   Anything that might change is a string payload (feed spec JSON, proposal
   payloads, dispute evidence), which is also what `MsgCall` needs.
+- **Self-upgrade goes through `dao/exec`.** The proxy authorizes by the realm
+  that crossed in and a realm cannot cross into itself, so a passed proposal
+  that changes the DAO's own release calls the tiny `dao/exec` trampoline,
+  which calls straight back into the DAO's proxy entry points; the trampoline
+  acts only when the DAO realm is its caller, and the DAO's authority is
+  `AnyOf(guardian, exec)` until handover leaves `exec` alone.
 - **`token` is not upgradeable.** A GRC20 ledger's value is its permanence;
   mint and burn authority is `ownable`, transferred to the `dao` permanent
   realm at bootstrap.
@@ -1085,7 +1091,7 @@ parallel by a second person from M3.
 | M0 | Spec | this document reviewed; decisions in §16 answered; toolchain pinned; repo scaffolded from `clockwork-gno-home`; `upgradeable/v0` mirrored into `deps/` | `make test` runs on v1.2.0 | **done 2026-09-23** |
 | M1 | Pure packages | `spec`, `agg`, `rounds`, `ledger`, `checkpoint`, `tally`, `params` with unit tests and gas pins | every invariant in §10.2 has a test; simulation skeleton | **done 2026-09-23** (gas pins and simulation skeleton still open) |
 | M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **in progress**: realms and realm tests done 2026-09-23; gnodev smoke (`make chain-test`), the 48 h agent soak and the v1b rollback rehearsal remain |
-| M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | 3 wk |
+| M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
 | M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local `r/kourtv3`, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | 4 wk |
 | M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | 3 wk |
 | M6 | Testnet | deploy to `pearl-1`, found the court on the pearl-1 Kourt realm (`gno.land/r/g13khfsjnnq6g3lz2e997jejc9kvlz2x5yx08dr0/kourt2`, generation to confirm), soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback | soak criteria in §13 met | 5 wk |
