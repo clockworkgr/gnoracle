@@ -1,0 +1,11 @@
+# fetched by `make deps` (on-chain dependencies mirrored for gno test / gnodev)
+/deps/
+# namespace-rewritten copies produced by `make build`
+/build/
+# throwaway keybase holding the public test1 dev key, created by `make dev-keys`
+/.dev-keys/
+/.gnodev/
+# Go build output for agent/, bot/, sim/
+/bin/
+# repo-local gno download cache (see Makefile)
+/.gnohome/

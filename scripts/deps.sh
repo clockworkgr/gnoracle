@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Populates deps/ with the source of every gno.land package this workspace
+# imports, read off the chain in SOURCE_REMOTE (mainnet by default) with
+# vm/qfile, transitively. `gno test` and gnodev then resolve exactly the code
+# that runs on the chain, regardless of what $GNOROOT/examples or any shared
+# download cache contain.
+#
+# The upgradeable package is on mainnet under the deployer's address
+# namespace; it is mirrored under the "clockwork" source namespace with its
+# module path rewritten, and `make build` rewrites it back (see deploy.sh).
+#
+#   SOURCE_REMOTE=https://rpc.pearl.testnets.gno.land:443 make deps
+#   FORCE=1 make deps        # re-fetch everything
+set -euo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"
+gnokey="${GNOKEY:-gnokey}"
+source_remote="${SOURCE_REMOTE:-https://rpc.gno.land:443}"
+addr_ns="g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm"
+own_p="gno.land/p/clockwork/gnoracle/"   # packages of this workspace: never fetched
+own_r="gno.land/r/clockwork/gnoracle/"
+
+[ "${FORCE:-}" = 1 ] && rm -rf "$here/deps"
+
+qfile() { "$gnokey" query vm/qfile -data "$1" -remote "$source_remote" 2>/dev/null | sed '1d; s/^data: //'; }
+
+# fetch_pkg <import path> [<on-chain path>]: mirror one package.
+fetch_pkg() {
+  local p="$1" src="${2:-$1}" d="$here/deps/$1" files f
+  files="$(qfile "$src")" || true
+  if [ -z "$files" ]; then
+    echo "deps: $src is not on $source_remote" >&2
+    return 1
+  fi
+  mkdir -p "$d"
+  for f in $files; do
+    case "$f" in
+      *_test.gno|*_filetest.gno) continue ;;
+      *.gno|gnomod.toml|README.md) qfile "$src/$f" > "$d/$f" ;;
+    esac
+  done
+  if [ "$src" != "$p" ]; then
+    sed -i '' -e "s#$src#$p#g" "$d"/*.gno "$d/gnomod.toml"
+  fi
+  echo "deps: $p <- $source_remote${2:+ ($2)}"
+}
+
+# imports lists every gno.land import spec under gno.land/ and deps/.
+imports() {
+  find "$here/gno.land" "$here/deps" -name '*.gno' -print0 2>/dev/null |
+    xargs -0 grep -hE '^[[:space:]]*(import[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*[[:space:]]+)?"gno\.land/[pr]/[^"]+"[[:space:]]*$' |
+    sed -E 's/.*"(gno\.land\/[^"]+)".*/\1/' | sort -u
+}
+
+# EXTRA lists import paths to mirror even before any source imports them
+# (space-separated), e.g. EXTRA="gno.land/p/clockwork/upgradeable/v0" make deps
+for p in ${EXTRA:-}; do
+  [ -f "$here/deps/$p/gnomod.toml" ] && continue
+  case "$p" in
+    gno.land/p/clockwork/upgradeable/v0|gno.land/p/clockwork/app/v0)
+      fetch_pkg "$p" "gno.land/p/$addr_ns/${p#gno.land/p/clockwork/}" ;;
+    *) fetch_pkg "$p" ;;
+  esac
+done
+
+changed=1
+while [ "$changed" = 1 ]; do
+  changed=0
+  for p in $(imports); do
+    case "$p" in "$own_p"*|"$own_r"*) continue ;; esac
+    [ -f "$here/deps/$p/gnomod.toml" ] && continue
+    case "$p" in
+      gno.land/p/clockwork/upgradeable/v0|gno.land/p/clockwork/app/v0)
+        fetch_pkg "$p" "gno.land/p/$addr_ns/${p#gno.land/p/clockwork/}" ;;
+      *) fetch_pkg "$p" ;;
+    esac
+    changed=1
+  done
+done
+echo "deps: up to date ($(find "$here/deps" -name gnomod.toml 2>/dev/null | wc -l | tr -d ' ') packages)"
