@@ -57,7 +57,7 @@ func defineParams() {
 	def("voidConsumeBps", "share of the bond consumed on a void outcome", 500, 0, 2000, 5000)
 	def("forfeitSplitWinnerBps", "share of forfeitures to the prevailing party", 5000, 0, 10_000, 5000)
 	def("forfeitSplitVotersBps", "share of forfeitures to coherent voters", 3000, 0, 10_000, 5000)
-	r.DefineString("daoRealm", "package path of the DAO realm that receives fee shares and verdict callbacks", "")
+	r.DefineString("daoRealm", "package path of the DAO realm that receives fee shares", DAOPath)
 	r.DefineString("kourtRealm", "package path of the Kourt adapter realm", "")
 }
 

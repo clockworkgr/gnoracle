@@ -254,11 +254,12 @@ Design rules
   `RealmTeller.TransferFrom` after an allowance.
 - A consumer read path touches `core` only and never calls back into the
   consumer. A provider submission path touches `core` only.
-- `dao` and `core` reference each other by package path constants and by
-  address. The only cross-realm interface value stored is `core`'s active
-  Kourt adapter, and the Kourt realm is called only from the adapter's crank,
-  never inside `core`'s hot paths; a panic there marks the mirror record
-  `Failed` and never aborts a resolution.
+- `dao` imports `core`; `core` cannot import `dao` back, so the DAO registers
+  a `BallotHouse` object with the core at init and the core calls it through
+  that interface (open ballot, finish, appeal round, fund voters). The Kourt
+  mirror never enters the core's paths: it reads the core's dispute records
+  and is advanced by its own `Crank`, so a Kourt failure can never block a
+  resolution.
 - Every public state transition is callable by anyone once its preconditions
   hold (crank functions), and pays the cranker a tip from the pool it settles.
 
@@ -592,11 +593,14 @@ specified: ambiguous spec, source unavailable, too early), `ABSTAIN`.
   choice, salt)`. UMA's 24 h + 24 h reaches about 92% participation with
   slashing; Aragon uses 2 d + 2 d.
 - Weight = `min(stakedAt(voter, sealedEpoch), stakedNow(voter))` (Kourt's
-  rule), then capped so that no single address counts for more than
-  `maxVoterShareBps` (default 2000, 20%) of the revealed weight (the cap is
-  applied at tally time by clipping the largest reveals; UMA's March 2025
-  vote had one holder at 25%). The cap is gameable by splitting, which is why
-  it is paired with the supermajority and the appeal.
+  rule). At tally time no single address counts for more than
+  `maxVoterShareBps` (default 2000, 20%) of the *obligated* (sealed) weight;
+  the cap is fixed and applied once to the heaviest reveals. (Capping against
+  the revealed total has no fixed point when few members vote, which the
+  first implementation showed; UMA's March 2025 vote had one holder at 25%.)
+  Penalties and rewards use members' real weights; only the decision uses the
+  clipped ones. The cap is gameable by splitting, which is why it is paired
+  with the supermajority and the appeal.
 - Obligated set = members with positive weight at the sealed epoch. There is
   no exclusion of interested parties as in Kourt: a member who is also a
   provider or the disputer has information; their conflict is public and
@@ -684,8 +688,10 @@ Pending ──OpenClaimP (CC deposit + fee)──► Filed ──Stake(verdict s
   zero (`StartCourt` then accepts a realm caller), slug `gnoracle`. If the
   burn is non-zero at deploy time an operator founds it and appoints the
   realm address as moderator.
-- Which Kourt: decided. An import path is compile-time, so `kourt/impl/v1`
-  targets the v3 realm at
+- Which Kourt: decided. An import path is compile-time. `kourt/impl/v1` binds
+  the local stand-in `gno.land/r/clockwork/gnoracle/kourtdev` (same entry
+  points and timings, no coin vote) so the mirror is testable on gnodev;
+  `kourt/impl/v2` targets the v3 realm at
   `gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3` (the
   deployment with `Redeem`). If kourt.xyz keeps pointing at the v2 realm at
   `gno.land/r/g1ecsuj0q572jr0dhu29q9njtnmw03hyu7tyyvv6/kourt`, a
@@ -1092,7 +1098,7 @@ parallel by a second person from M3.
 | M1 | Pure packages | `spec`, `agg`, `rounds`, `ledger`, `checkpoint`, `tally`, `params` with unit tests and gas pins | every invariant in §10.2 has a test; simulation skeleton | **done 2026-09-23** (gas pins and simulation skeleton still open) |
 | M2 | Core without disputes | permanent `core` (interface, state, gated store, proxy, entry points), `core/impl/v1` feeds, providers, rounds, credits, sponsors, `Read`, prune; Render | three fake agents keep an hourly feed live for 48 h on gnodev; a consumer realm reads and is billed; an `impl/v2` is accepted and rolled back by the guardian | **in progress**: realms and realm tests done 2026-09-23; gnodev smoke (`make chain-test`), the 48 h agent soak and the v1b rollback rehearsal remain |
 | M3 | Token and DAO | `token`, permanent `dao` plus `dao/impl/v1` staking, checkpoints, proposals, `feed-accept`, `upgrade-*` kinds, treasury, guardian | feeds accepted by vote; stake and unstake with cooldown; fee accumulator pays; an upgrade of `core` executed through a proposal with timelock | **done 2026-09-23** (realm tests: staking and weight, fee sync, feed-accept and param proposals on the core with timelock, treasury and rate-limited mint, DAO self-upgrade and rollback through the `dao/exec` trampoline; the founder vesting fields exist but no genesis vesting is applied yet) |
-| M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local `r/kourtv3`, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | 4 wk |
+| M4 | Disputes and Kourt | dispute open, commit-reveal, clipping, supermajority, roll, appeal, penalties with lazy settle, forfeiture routing, `kourt` permanent realm plus `impl/v1` against a local stand-in Kourt realm, bot cranks | all dispute stories pass; a resolved dispute appears as a settled Kourt claim on the local chain; attribution shown | **done 2026-09-23** against the stand-in `kourtdev` realm (file, stake, answer, settle; contested claim recorded as dissent; "built on Kourt" on the mirror pages). Binding `kourt/impl/v2` to a deployed Kourt and the notifier bot's cranking move to M5/M6 |
 | M5 | Agents and operations | provider agent with three adapters, bot with reminders, docs for consumers, providers, sponsors and members, `OPERATIONS.md`, simulation report | two outside testers run agents from the docs alone | 3 wk |
 | M6 | Testnet | deploy to `pearl-1`, found the court on the pearl-1 Kourt realm (`gno.land/r/g13khfsjnnq6g3lz2e997jejc9kvlz2x5yx08dr0/kourt2`, generation to confirm), soak 4 weeks, parameter tuning by DAO vote, one live upgrade and one rollback | soak criteria in §13 met | 5 wk |
 | M7 | Audit and mainnet | external audit, fixes, mutation run, mainnet `addpkg` approvals, PYTH genesis distribution, Gnoswap pool, first feeds (gnomarket outcomes, GNOT/USD), guardian handover scheduled | audit findings closed; at least 25 stakers | 6 wk + audit lead time |
@@ -1184,9 +1190,9 @@ func Withdraw(cur realm, feedID uint64) int64
 func Unjail(cur realm, feedID uint64)
 func ClaimRewards(cur realm, feedID uint64, maxRounds int) int64
 // disputes
-func Dispute(cur realm, feedID, roundID uint64, proposedValue int64, tier, evidence string) uint64 // -send: bond
-func Appeal(cur realm, disputeID uint64)                              // -send: 2x bond
-func ResolveDispute(cur realm, disputeID uint64)
+func Dispute(cur realm, feedID, roundID uint64, proposedValue int64, tier, evidence string) uint64 // -send: bond; tier minor|major
+func Appeal(cur realm, disputeID uint64)                              // -send: 2x bond, inside appealWindow after a round-1 decision
+func ResolveDispute(cur realm, disputeID uint64)                      // reads round 1, waits out the appeal window, reads round 2, applies
 // governance hooks (dao only)
 func ActivateFeed(cur realm, feedID uint64)
 func UpdateFeed(cur realm, feedID uint64, changesJSON string)

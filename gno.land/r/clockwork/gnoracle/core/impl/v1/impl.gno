@@ -51,21 +51,3 @@ func schedule(f *core.Feed) rounds.Schedule {
 func isServing(f *core.Feed) bool {
 	return f.Status == core.FeedActive || f.Status == core.FeedUnfunded
 }
-
-// ---- disputes: a later release
-
-func (*implV1) Dispute(_ int, rlm realm, disputer address, feedID, roundID uint64, proposedValue int64, tier, evidence string, sent int64) uint64 {
-	panic("gnoracle: disputes are served by a later release")
-}
-
-func (*implV1) Appeal(_ int, rlm realm, appellant address, disputeID uint64, sent int64) {
-	panic("gnoracle: disputes are served by a later release")
-}
-
-func (*implV1) ResolveDispute(_ int, rlm realm, caller address, disputeID uint64) {
-	panic("gnoracle: disputes are served by a later release")
-}
-
-func (*implV1) ReopenOneOff(_ int, rlm realm, caller address, feedID uint64, resolveAt int64) {
-	panic("gnoracle: reopening a voided feed is served by a later release")
-}

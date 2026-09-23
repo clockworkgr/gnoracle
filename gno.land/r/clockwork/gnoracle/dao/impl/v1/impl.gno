@@ -206,21 +206,3 @@ func indexByte(s string, c byte) int {
 	}
 	return len(s)
 }
-
-// ---- dispute ballots: the disputes release
-
-func (*implV1) OpenDisputeVote(_ int, rlm realm, disputeID uint64, majorRequested bool, summary string) uint64 {
-	panic("dao: dispute ballots are served by a later release")
-}
-
-func (*implV1) CommitVote(_ int, rlm realm, voter address, disputeID uint64, commitment string) {
-	panic("dao: dispute ballots are served by a later release")
-}
-
-func (*implV1) RevealVote(_ int, rlm realm, voter address, disputeID uint64, choice, salt string) {
-	panic("dao: dispute ballots are served by a later release")
-}
-
-func (*implV1) FinishDisputeVote(_ int, rlm realm, disputeID uint64) (string, string, int64) {
-	panic("dao: dispute ballots are served by a later release")
-}

@@ -103,6 +103,8 @@ func install(cur realm) {
 	dao.RegisterImpl(cross(cur), daoimpl.Instance())
 	testing.SetRealm(testing.NewCodeRealm(execPath))
 	dao.RegisterTrampoline(cross(cur), exec.Instance())
+	testing.SetRealm(testing.NewCodeRealm(daoPath))
+	core.RegisterDAO(cross(cur), dao.Hooks())
 	// the admin accepts both, hands the core's authority to the DAO (keeping
 	// its own key for the bootstrap), and makes the DAO the token's minter
 	testing.SetRealm(testing.NewUserRealm(admin))

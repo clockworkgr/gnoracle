@@ -116,26 +116,34 @@ func TestTopAndClip(t *testing.T) {
 	uassert.Equal(t, int64(100), top[2].Weight)
 	uassert.Equal(t, int64(29), top[3].Weight)
 
-	// clipping: one whale with 60% of the revealed weight, cap 20%
+	// clipping: one whale with 60% of the revealed weight, cap 20% of the
+	// obligated weight (1000)
 	w := tally.Weights{Overturn: 600, Uphold: 400}
 	whale := []tally.Reveal{{Voter: alice, Choice: tally.ChoiceOverturn, Weight: 600}}
-	clipped, removed := tally.Clip(w, whale, 2000)
-	// converges to whale = 25% of the post-clip total: x = 0.2 * (x + 400) -> x = 100
-	uassert.Equal(t, int64(100), clipped.Overturn)
+	clipped, removed := tally.Clip(w, whale, 2000, 1000)
+	uassert.Equal(t, int64(200), clipped.Overturn) // capped at 20% of 1000
 	uassert.Equal(t, int64(400), clipped.Uphold)
-	uassert.Equal(t, int64(500), removed)
+	uassert.Equal(t, int64(400), removed)
 	res := tally.Decide(clipped, 1000, rules())
 	uassert.Equal(t, string(tally.OutcomeUphold), string(res.Outcome))
 
+	// the cap is applied once per heavy voter, never iterated to nothing
+	three := tally.Weights{Overturn: 1000, Uphold: 400}
+	tops := []tally.Reveal{{Voter: alice, Choice: tally.ChoiceOverturn, Weight: 1000}, {Voter: bob, Choice: tally.ChoiceUphold, Weight: 300}, {Voter: carol, Choice: tally.ChoiceUphold, Weight: 100}}
+	clipped, removed = tally.Clip(three, tops, 2000, 1400)
+	uassert.Equal(t, int64(280), clipped.Overturn) // 20% of 1400
+	uassert.Equal(t, int64(380), clipped.Uphold)   // bob 300 -> 280, carol 100
+	uassert.Equal(t, int64(740), removed)
+
 	// nobody above the cap: untouched
-	clipped, removed = tally.Clip(tally.Weights{Uphold: 100, Overturn: 100}, []tally.Reveal{{Voter: bob, Choice: tally.ChoiceUphold, Weight: 30}}, 2000)
+	clipped, removed = tally.Clip(tally.Weights{Uphold: 100, Overturn: 100}, []tally.Reveal{{Voter: bob, Choice: tally.ChoiceUphold, Weight: 30}}, 2000, 1000)
 	uassert.Equal(t, int64(0), removed)
 	uassert.Equal(t, int64(100), clipped.Uphold)
 }
 
 func TestClipRefusesInexactCap(cur realm, t *testing.T) {
 	uassert.PanicsWithMessage(t, cur, "tally: cap below 1/TopK cannot be applied exactly", func() {
-		tally.Clip(tally.Weights{Uphold: 1}, nil, 1000)
+		tally.Clip(tally.Weights{Uphold: 1}, nil, 1000, 1000)
 	})
 }
 

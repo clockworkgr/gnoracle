@@ -131,6 +131,19 @@ step "a text proposal and a vote (voting weight activates next epoch, so this ma
 KEY=test1 tx call -pkgpath "$DAO" -func Propose -args text -args "hello" -args "First proposal" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
 echo "proposals: $(qeval "$DAO.ProposalCount()")"
 
+step "Kourt mirror: accept its implementation, found the court, fund the float"
+KOURT="gno.land/r/$NS/gnoracle/kourt"
+KDEV="gno.land/r/$NS/gnoracle/kourtdev"
+KIMPL="$KOURT/impl/v1"
+if [ "$(qeval "$KOURT.LivePath()")" != "(\"$KIMPL\" string)" ]; then
+  KEY=test1 tx call -pkgpath "$KOURT" -func Accept -args "$KIMPL" -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+fi
+KEY=test1 tx call -pkgpath "$KOURT" -func EnsureCourt -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+KADDR="$(qeval "$KOURT.Address()" | grep -oE 'g1[0-9a-z]{38}' | head -1)"
+KEY=test1 tx call -pkgpath "$KDEV" -func Buy -args gnoracle -args 0 -send 10000000ugnot -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+KEY=test1 tx call -pkgpath "$KDEV" -func TransferCC -args gnoracle -args "$KADDR" -args 10000000 -gas-fee "$CALL_GAS_FEE" -gas-wanted "$CALL_GAS_WANTED" -max-deposit 50000000ugnot
+echo "mirror float (CC): $(qeval "$KDEV.CoinBalanceOf(\"gnoracle\", \"$KADDR\")")"
+
 step "health and page"
 echo "$(qeval "$CORE.Health()")"
 qrender "$CORE" "feed/$FEED" | head -30

@@ -62,7 +62,7 @@ RPC ?= 26657
 WEB ?= 8888
 
 dev: toolchain deps ## local chain + gnoweb at http://127.0.0.1:$(WEB)/r/clockwork/gnoracle/core
-	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -paths gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/exec -web-home /r/clockwork/gnoracle/core .
+	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -paths gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1 -web-home /r/clockwork/gnoracle/core .
 
 chain-test: ## drive a running gnodev through a feed lifecycle with gnokey (needs make dev in another shell)
 	@./scripts/chain-test.sh

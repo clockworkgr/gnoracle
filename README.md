@@ -11,8 +11,9 @@ test in progress. Run `make toolchain && make test`.
 
 Layout: pure packages under `gno.land/p/clockwork/gnoracle/*/v0`; permanent
 realms `gno.land/r/clockwork/gnoracle/{core,dao,token}` with implementations at
-`core/impl/v1` and `dao/impl/v1` (`impl/v2` are upgrade rehearsals) and the
-`dao/exec` self-upgrade trampoline; `make build` rewrites the `clockwork`
+`core/impl/v1`, `dao/impl/v1` and `kourt/impl/v1` (`impl/v2` are upgrade
+rehearsals), the `dao/exec` self-upgrade trampoline and the `kourtdev`
+stand-in for Kourt; `make build` rewrites the `clockwork`
 namespace to the deployer address.
 
 - `docs/IMPLEMENTATION_PLAN.md`: design, tokenomics, security analysis,

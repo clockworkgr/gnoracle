@@ -44,8 +44,10 @@ const (
 	RoundSkipped    = "skipped"
 	RoundVoid       = "void"
 
-	DisputeOpen     = "open"
-	DisputeResolved = "resolved"
+	DisputeOpen     = "open"     // round-1 ballot running
+	DisputeDecided  = "decided"  // round-1 outcome recorded; appeal window open
+	DisputeAppealed = "appealed" // round-2 ballot running
+	DisputeResolved = "resolved" // outcome applied
 )
 
 // Feed is one oracle feed. Fields are read by implementations; they change
@@ -218,12 +220,18 @@ type DisputeRecord struct {
 	OpenedAt      int64
 	Status        string
 	BallotRound   int64
-	Outcome       string
+	Outcome       string // the standing outcome (round 1 until an appeal replaces it)
+	FirstOutcome  string
 	TierDecided   string
+	DecidedAt     int64
 	ResolvedAt    int64
 	Appellant     address
 	AppealBond    int64
-	KourtRecord   uint64
+	AppealAt      int64
+	CoherentW     int64
+	Slashed       int64 // total taken from providers on an overturn
+	PriorValue    int64 // the round's value before an overturn
+	PriorTier     string
 }
 
 // ------------------------------------------------------------- tables ----
@@ -467,6 +475,21 @@ func (r *StateRef) FeedSetStart(id uint64, startAt int64, reopened bool) {
 	f := mustFeed(id)
 	f.StartAt = startAt
 	f.Reopened = reopened
+}
+
+// FeedResetForReopen restarts a voided one-off feed at a new resolve time.
+func (r *StateRef) FeedResetForReopen(id uint64, startAt int64) {
+	r.check()
+	f := mustFeed(id)
+	f.StartAt = startAt
+	f.Reopened = true
+	f.HaveLast = false
+	f.LastFinalized = 0
+	f.HaveValue = false
+	f.LastTier = ""
+	f.EmptyStreak = 0
+	rounds.Remove(roundKey(id, 0))
+	emit("FeedReopened", "feed", u(id), "resolveAt", strconv.FormatInt(startAt, 10))
 }
 
 // FeedSetDrip changes the per-round drip.
@@ -1070,6 +1093,275 @@ func (r *StateRef) MissSlash(feed uint64, addr address, amount int64, alerter ad
 		r.send(alerter, alert)
 	}
 	emit("ProviderSlashed", "feed", u(feed), "provider", string(addr), "amount", strconv.FormatInt(amount, 10), "reason", "miss")
+}
+
+// ---- disputes
+
+// NewDispute records a dispute with its bond already received.
+func (r *StateRef) NewDispute(feed, round uint64, disputer address, bond, proposedValue int64, tier, evidence, evidenceHash string, priorValue int64, priorTier string) *DisputeRecord {
+	r.check()
+	if bond <= 0 {
+		panic("core: bond must be positive")
+	}
+	id := uint64(disputeSeq.Next())
+	d := &DisputeRecord{ID: id, Feed: feed, Round: round, Disputer: disputer, Bond: bond, ProposedValue: proposedValue,
+		TierAsked: tier, Evidence: evidence, EvidenceHash: evidenceHash, OpenedAt: Now(), Status: DisputeOpen, BallotRound: 1,
+		PriorValue: priorValue, PriorTier: priorTier}
+	disputes.Set(u64key(id), d)
+	held.Bonds += bond
+	emit("DisputeOpened", "dispute", u(id), "feed", u(feed), "round", u(round), "disputer", string(disputer),
+		"bond", strconv.FormatInt(bond, 10), "proposedValue", strconv.FormatInt(proposedValue, 10), "tier", tier)
+	return d
+}
+
+func mustDispute(id uint64) *DisputeRecord {
+	d := GetDispute(id)
+	if d == nil {
+		panic("core: unknown dispute " + u(id))
+	}
+	return d
+}
+
+// DisputeSetDecided records a round-1 outcome and opens the appeal window.
+func (r *StateRef) DisputeSetDecided(id uint64, outcome, tier string, coherent int64) {
+	r.check()
+	d := mustDispute(id)
+	d.Status = DisputeDecided
+	d.Outcome = outcome
+	d.FirstOutcome = outcome
+	d.TierDecided = tier
+	d.CoherentW = coherent
+	d.DecidedAt = Now()
+	emit("DisputeDecided", "dispute", u(id), "round", "1", "outcome", outcome, "tier", tier)
+}
+
+// DisputeSetAppealed records an appeal bond and the second ballot round.
+func (r *StateRef) DisputeSetAppealed(id uint64, appellant address, bond int64) {
+	r.check()
+	d := mustDispute(id)
+	d.Status = DisputeAppealed
+	d.Appellant = appellant
+	d.AppealBond = bond
+	d.AppealAt = Now()
+	d.BallotRound = 2
+	held.Bonds += bond
+	emit("AppealOpened", "dispute", u(id), "appellant", string(appellant), "bond", strconv.FormatInt(bond, 10))
+}
+
+// DisputeSetRolled records that the ballot rolled to a second round.
+func (r *StateRef) DisputeSetRolled(id uint64) {
+	r.check()
+	d := mustDispute(id)
+	d.Status = DisputeAppealed
+	d.BallotRound = 2
+	emit("DisputeRolled", "dispute", u(id))
+}
+
+// DisputeSetResolved records the applied outcome.
+func (r *StateRef) DisputeSetResolved(id uint64, outcome, tier string, coherent, slashed int64) {
+	r.check()
+	d := mustDispute(id)
+	d.Status = DisputeResolved
+	d.Outcome = outcome
+	d.TierDecided = tier
+	d.CoherentW = coherent
+	d.Slashed = slashed
+	d.ResolvedAt = Now()
+	emit("DisputeResolved", "dispute", u(id), "round", strconv.FormatInt(d.BallotRound, 10), "outcome", outcome, "tier", tier,
+		"slashed", strconv.FormatInt(slashed, 10))
+}
+
+// BondRelease pays part of a held bond back to someone (the disputer, the
+// appellant, or a provider) and reduces the Bonds category.
+func (r *StateRef) BondRelease(id uint64, to address, amount int64) {
+	r.check()
+	if amount <= 0 {
+		return
+	}
+	if amount > held.Bonds {
+		panic("core: bond accounting short")
+	}
+	held.Bonds -= amount
+	r.send(to, amount)
+}
+
+// BondToPool credits part of a held bond to a feed's provider pool.
+func (r *StateRef) BondToPool(id uint64, feed uint64, amount int64) {
+	r.check()
+	if amount <= 0 {
+		return
+	}
+	if amount > held.Bonds {
+		panic("core: bond accounting short")
+	}
+	held.Bonds -= amount
+	mustFeed(feed).PenaltyCarry += amount
+	held.Pools += amount
+}
+
+// BondToFees credits part of a held bond to the fee pool (treasury share).
+func (r *StateRef) BondToFees(id uint64, amount int64) {
+	r.check()
+	if amount <= 0 {
+		return
+	}
+	if amount > held.Bonds {
+		panic("core: bond accounting short")
+	}
+	held.Bonds -= amount
+	held.FeesPending += amount
+}
+
+// BondToVoters moves part of a held bond out of the Bonds category for
+// FundVoters, which sends it to the DAO.
+func (r *StateRef) BondToVoters(id uint64, amount int64) {
+	r.check()
+	if amount <= 0 {
+		return
+	}
+	if amount > held.Bonds {
+		panic("core: bond accounting short")
+	}
+	held.Bonds -= amount
+	r.FundVoters(id, amount)
+}
+
+// SlashProvider takes bps of a provider's stake (or unbonding balance) after a
+// lost dispute. At the major tier the provider is ejected: its slot is
+// cleared and the rest of its stake starts unbonding. The slashed amount is
+// moved to the Bonds category, from which the caller routes it. Returns the
+// amount taken.
+func (r *StateRef) SlashProvider(feed uint64, addr address, bps int64, tier string, fromRound uint64) int64 {
+	r.check()
+	p := GetProvider(feed, addr)
+	if p == nil {
+		return 0
+	}
+	amount := (p.Stake + p.UnbondAmount) * bps / 10_000
+	if amount <= 0 {
+		return 0
+	}
+	taken := int64(0)
+	if p.Stake > 0 {
+		x := amount
+		if x > p.Stake {
+			x = p.Stake
+		}
+		p.Stake -= x
+		held.Stakes -= x
+		taken += x
+	}
+	if rest := amount - taken; rest > 0 && p.UnbondAmount > 0 {
+		if rest > p.UnbondAmount {
+			rest = p.UnbondAmount
+		}
+		p.UnbondAmount -= rest
+		held.Unbonding -= rest
+		taken += rest
+	}
+	p.TotalSlashed += taken
+	held.Bonds += taken
+	if tier == "minor" {
+		p.MinorsEpoch++
+	}
+	emit("ProviderSlashed", "feed", u(feed), "provider", string(addr), "amount", strconv.FormatInt(taken, 10), "reason", "dispute-"+tier)
+	if tier == "major" && (p.Status == ProviderActive || p.Status == ProviderJailed) {
+		if p.Status == ProviderActive {
+			f := mustFeed(feed)
+			if p.Slot >= 0 && p.Slot < MaxSlots && f.SlotAt(int(p.Slot)) == addr {
+				f.Slots = setCell(f.Slots, int(p.Slot), slotWidth, blankCell())
+				f.ActiveCount--
+				slotlog.Set(slotKey(feed, p.Slot, fromRound), address(""))
+			}
+		}
+		if p.Stake > 0 {
+			held.Stakes -= p.Stake
+			held.Unbonding += p.Stake
+			p.UnbondAmount += p.Stake
+			p.Stake = 0
+		}
+		p.Status = ProviderUnbonding
+		p.Slot = -1
+		p.UnbondReadyAt = Now() + Param("unbondPeriod")
+		emit("ProviderEjected", "feed", u(feed), "provider", string(addr))
+	}
+	return taken
+}
+
+// RoundOverturn replaces a round's value after a successful dispute and
+// updates the served value when the round is the feed's latest.
+func (r *StateRef) RoundOverturn(feed, id uint64, value int64) {
+	r.check()
+	rd := GetRound(feed, id)
+	if rd == nil {
+		panic("core: unknown round")
+	}
+	rd.Value = value
+	rd.Status = RoundAggregated
+	rd.Tier = "final"
+	rd.Overturned = true
+	f := mustFeed(feed)
+	if f.HaveValue && f.LastRound == id {
+		f.LastValue = value
+		f.LastTier = "final"
+	}
+}
+
+// RoundVoid marks a round void after a dispute; a voided latest round leaves
+// the feed without a served value.
+func (r *StateRef) RoundVoid(feed, id uint64) {
+	r.check()
+	rd := GetRound(feed, id)
+	if rd == nil {
+		panic("core: unknown round")
+	}
+	rd.Status = RoundVoid
+	rd.Tier = "void"
+	f := mustFeed(feed)
+	if f.HaveValue && f.LastRound == id {
+		f.LastTier = "void"
+	}
+}
+
+// RoundRestartWindow returns an upheld round to its prior tier with a fresh
+// dispute window.
+func (r *StateRef) RoundRestartWindow(feed, id uint64, tier string) {
+	r.check()
+	rd := GetRound(feed, id)
+	if rd == nil {
+		panic("core: unknown round")
+	}
+	rd.Status = RoundAggregated
+	rd.Tier = tier
+	rd.FinalisedAt = Now()
+	f := mustFeed(feed)
+	if f.HaveValue && f.LastRound == id {
+		f.LastTier = tier
+		f.LastFinalAt = Now()
+	}
+}
+
+// RoundMarkDisputed links a round to its dispute while the ballot runs.
+func (r *StateRef) RoundMarkDisputed(feed, id uint64, disputeID uint64) {
+	r.check()
+	rd := GetRound(feed, id)
+	if rd == nil {
+		panic("core: unknown round")
+	}
+	rd.DisputeID = disputeID
+	rd.Tier = "disputed"
+	f := mustFeed(feed)
+	if f.HaveValue && f.LastRound == id {
+		f.LastTier = "disputed"
+	}
+}
+
+func blankCell() string {
+	b := make([]byte, slotWidth)
+	for i := range b {
+		b[i] = ' '
+	}
+	return string(b)
 }
 
 // ---- trusted requesters

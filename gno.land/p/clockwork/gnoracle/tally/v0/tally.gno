@@ -186,42 +186,30 @@ func ReplaceTop(top []Reveal, r Reveal) []Reveal {
 	return InsertTop(out, r)
 }
 
-// Clip applies the per-address cap. cap = capBps of the revealed total; any
-// of the heaviest voters above it is reduced to the cap; the total shrinks,
-// so the pass repeats until nothing changes. It returns the clipped weights
-// and the total weight removed. capBps must be at least Bps/TopK, otherwise a
-// voter outside the kept heaviest could exceed the cap and the pass would be
-// inexact; the DAO's parameter bounds enforce that.
-func Clip(w Weights, top []Reveal, capBps int64) (Weights, int64) {
+// Clip applies the per-address cap: no reveal counts for more than capBps
+// of the obligated (sealed) weight. The cap is fixed, so it is applied once
+// to each of the heaviest reveals; capping against the revealed total would
+// have no fixed point when few members vote. It returns the clipped weights
+// and the total weight removed. capBps must be at least Bps/TopK, so that no
+// voter outside the kept heaviest can exceed the cap; the DAO's parameter
+// bounds enforce that.
+func Clip(w Weights, top []Reveal, capBps, obligated int64) (Weights, int64) {
 	if capBps <= 0 || capBps > Bps {
 		panic("tally: cap out of range")
 	}
 	if capBps*int64(TopK) < Bps {
 		panic("tally: cap below 1/TopK cannot be applied exactly")
 	}
-	cur := make([]int64, len(top))
-	for i := range top {
-		cur[i] = top[i].Weight
+	if obligated <= 0 {
+		return w, 0
 	}
+	limit := mulDiv(obligated, capBps, Bps)
 	var removed int64
-	for iter := 0; iter < 32; iter++ {
-		total := w.Total()
-		if total <= 0 {
-			break
-		}
-		limit := mulDiv(total, capBps, Bps)
-		changed := false
-		for i := range top {
-			if cur[i] > limit {
-				excess := cur[i] - limit
-				w.Sub(top[i].Choice, excess)
-				cur[i] = limit
-				removed += excess
-				changed = true
-			}
-		}
-		if !changed {
-			break
+	for _, r := range top {
+		if r.Weight > limit {
+			excess := r.Weight - limit
+			w.Sub(r.Choice, excess)
+			removed += excess
 		}
 	}
 	return w, removed

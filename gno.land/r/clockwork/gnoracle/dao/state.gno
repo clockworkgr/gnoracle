@@ -100,6 +100,7 @@ type Ballot struct {
 	ClippedAway    int64
 	ResolvedAt     int64
 	TopReveals     string // packed heaviest reveals for clipping (impl-defined encoding)
+	PrevSeq        uint64 // the round-1 ballot this round-2 ballot follows
 }
 
 // ------------------------------------------------------------- tables ----
@@ -598,11 +599,11 @@ func (r *StateRef) Mint(to address, amount int64, year int64) {
 // ---- dispute ballots (records only; the disputes release drives them)
 
 // NewBallot opens a ballot record and returns its sequence.
-func (r *StateRef) NewBallot(disputeID uint64, round int64, majorRequested bool, summary string, sealed uint32, obligated int64, commitEnds, revealEnds int64) uint64 {
+func (r *StateRef) NewBallot(disputeID uint64, round int64, majorRequested bool, summary string, sealed uint32, obligated int64, commitEnds, revealEnds int64, prev uint64) uint64 {
 	r.check()
 	seq := uint64(ballotSeq.Next())
 	b := &Ballot{Dispute: disputeID, Round: round, MajorRequested: majorRequested, Summary: summary, SealedEpoch: sealed,
-		Obligated: obligated, Phase: BallotCommit, CommitEnds: commitEnds, RevealEnds: revealEnds}
+		Obligated: obligated, Phase: BallotCommit, CommitEnds: commitEnds, RevealEnds: revealEnds, PrevSeq: prev}
 	ballots.Set(u64key(seq), b)
 	byDispute.Set(u64key(disputeID), seq)
 	emit("DisputeBallotOpened", "dispute", strconv.FormatUint(disputeID, 10), "ballot", strconv.FormatUint(seq, 10), "round", strconv.FormatInt(round, 10))
@@ -671,9 +672,25 @@ func (r *StateRef) BallotResolve(seq uint64, outcome, tier string, uphold, overt
 	b.CoherentWeight = coherent
 	b.ExpectedPool = expectedPool
 	b.ClippedAway = clipped
-	b.BondShareUgnot = bondShare
+	b.BondShareUgnot += bondShare
 	b.ResolvedAt = Now()
 	held.RewardUgnot += bondShare
+	emit("DisputeBallotResolved", "ballot", strconv.FormatUint(seq, 10), "dispute", strconv.FormatUint(b.Dispute, 10), "outcome", outcome, "tier", tier)
+}
+
+// BallotFund records coins that arrived for a ballot's coherent voters.
+func (r *StateRef) BallotFund(seq uint64, amount int64) {
+	r.check()
+	b := GetBallot(seq)
+	if b == nil {
+		panic("dao: unknown ballot")
+	}
+	if amount <= 0 {
+		return
+	}
+	b.BondShareUgnot += amount
+	held.RewardUgnot += amount
+	held.KnownUgnot += amount
 }
 
 // ---- helpers

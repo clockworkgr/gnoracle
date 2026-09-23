@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"gno.land/p/clockwork/upgradeable/v0"
+	"gno.land/r/clockwork/gnoracle/core"
 )
 
 // Admin is the bootstrap authority (the public test1 key for gnodev;
@@ -47,7 +48,31 @@ func init(cur realm) {
 		upgradeable.NewRealmAuthority(ExecPath),
 	))
 	defineParams()
+	core.RegisterDAO(cross(cur), hooks{})
 }
+
+// hooks is what this realm registers with the core as its ballot house. The
+// methods are crossing, so the core is the caller the entry points gate on.
+type hooks struct{}
+
+func (hooks) OpenDisputeVote(cur realm, disputeID uint64, majorRequested bool, summary string) uint64 {
+	return OpenDisputeVote(cur, disputeID, majorRequested, summary)
+}
+
+func (hooks) FinishDisputeVote(cur realm, disputeID uint64) (string, string, int64) {
+	return FinishDisputeVote(cur, disputeID)
+}
+
+func (hooks) OpenAppealRound(cur realm, disputeID uint64) uint64 {
+	return OpenAppealRound(cur, disputeID)
+}
+
+func (hooks) FundVoters(cur realm, disputeID uint64, amount int64) {
+	FundVoters(cur, disputeID, amount)
+}
+
+// Hooks returns the ballot house object, for tests that stand in for init.
+func Hooks() core.BallotHouse { return hooks{} }
 
 // DAO is the behaviour this realm promises to its implementations.
 type DAO interface {
@@ -69,6 +94,8 @@ type DAO interface {
 	CommitVote(_ int, rlm realm, voter address, disputeID uint64, commitment string)
 	RevealVote(_ int, rlm realm, voter address, disputeID uint64, choice, salt string)
 	FinishDisputeVote(_ int, rlm realm, disputeID uint64) (outcome, tier string, coherentWeight int64)
+	OpenAppealRound(_ int, rlm realm, disputeID uint64) uint64
+	FundVoters(_ int, rlm realm, disputeID uint64, amount int64)
 	// rendering
 	Render(_ int, rlm realm, path string) string
 }
@@ -153,6 +180,19 @@ func RevealVote(cur realm, disputeID uint64, choice, salt string) {
 func FinishDisputeVote(cur realm, disputeID uint64) (string, string, int64) {
 	assertCore(cur)
 	return live().FinishDisputeVote(0, cur, disputeID)
+}
+
+// OpenAppealRound runs a second ballot round for a dispute. Core only.
+func OpenAppealRound(cur realm, disputeID uint64) uint64 {
+	assertCore(cur)
+	return live().OpenAppealRound(0, cur, disputeID)
+}
+
+// FundVoters records coins the core sent for a dispute's coherent voters.
+// Core only.
+func FundVoters(cur realm, disputeID uint64, amount int64) {
+	assertCore(cur)
+	live().FundVoters(0, cur, disputeID, amount)
 }
 
 func assertCore(cur realm) {
