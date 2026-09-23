@@ -152,3 +152,14 @@ func TestMulDivRefusesOverflowAndBadDivisor(cur realm, t *testing.T) {
 		agg.LowerMedian(agg.Submissions{Values: []int64{1}, Present: []bool{true, true}})
 	})
 }
+
+func TestCategoricalTierIgnoresTheMoveTest(t *testing.T) {
+	in := agg.TierInput{Eligible: 3, Active: 3, MinProviders: 2, Value: 2, LastFinal: 0, HaveLast: true, QuarantineBps: 1000, Categorical: true}
+	if got := agg.DecideTier(in); got != agg.TierConsensus {
+		t.Fatalf("categorical change of option must stay consensus, got %s", got)
+	}
+	in.Categorical = false
+	if got := agg.DecideTier(in); got != agg.TierProvisional {
+		t.Fatalf("numeric jump from 0 must be provisional, got %s", got)
+	}
+}

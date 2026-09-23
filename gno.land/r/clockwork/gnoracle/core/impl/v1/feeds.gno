@@ -10,11 +10,15 @@ import (
 )
 
 func limits() spec.Limits {
+	// unbonding must outlast a dispute opened at the end of the window: two
+	// ballot rounds (24 h + 24 h, then 48 h + 24 h) plus the appeal window
+	maxDispute := param("unbondPeriod") - 6*24*3600 - param("appealWindow")
 	return spec.Limits{
 		ProviderMinStakeFloor: param("providerMinStakeFloor"),
 		ReadPriceFloor:        param("readPriceFloor"),
 		SubscriptionFloor:     param("subscriptionFloor"),
 		BountyFloor:           param("bountyFloor"),
+		MaxDisputeWindow:      maxDispute,
 	}
 }
 
@@ -39,13 +43,13 @@ func (*implV1) ProposeFeed(_ int, rlm realm, proposer address, callerPkg string,
 		if sent != 0 {
 			panic("gnoracle: a realm cannot attach coins; its credit pays")
 		}
-		st.CreditSpendOnFeed(proposer, f.ID, deposit, funding, !sp.IsRecurring())
+		st.CreditSpendOnFeed(proposer, f.ID, deposit, funding)
 	} else {
 		if sent < required {
 			panic("gnoracle: send at least " + i(required) + StakeUnit + " (deposit " + i(deposit) + " plus funding " + i(funding) + ")")
 		}
 		st.CreditDeposit(proposer, sent)
-		st.CreditSpendOnFeed(proposer, f.ID, deposit, sent-deposit, !sp.IsRecurring())
+		st.CreditSpendOnFeed(proposer, f.ID, deposit, sent-deposit)
 	}
 	// trusted requesters self-activate one-off feeds under the cap
 	if fromRealm && !sp.IsRecurring() {
@@ -109,12 +113,27 @@ func (*implV1) DeprecateFeed(_ int, rlm realm, feedID uint64, reason string) {
 	}
 	if f.Status == core.FeedProposed {
 		if reason == "spam" {
-			st.DepositToFees(feedID)
+			st.DepositToFees(feedID) // the deposit; the prepayment still goes back
 		} else {
 			st.DepositRefund(feedID)
 		}
 	}
-	st.FeedPoolToFees(feedID)
+	if f.Spec.IsRecurring() {
+		st.FeedPoolToFees(feedID)
+	} else {
+		st.FeedPoolRefund(feedID) // an undistributed bounty is the requester's
+	}
+	// nothing will be served again: every seated provider starts unbonding
+	var seated []*core.Provider
+	core.IterateProviders(feedID, func(p *core.Provider) bool {
+		if p.Status == core.ProviderActive || p.Status == core.ProviderJailed {
+			seated = append(seated, p)
+		}
+		return false
+	})
+	for _, p := range seated {
+		leave(st, mustFeed(feedID), p)
+	}
 	st.FeedSetStatus(feedID, core.FeedDeprecated)
 	st.Emit("FeedDeprecated", "feed", u(feedID), "reason", reason)
 }
@@ -258,6 +277,9 @@ func (*implV1) PruneRounds(_ int, rlm realm, caller address, feedID uint64, maxR
 	retention := param("roundRetention")
 	keep := uint64(param("minRoundsKept"))
 	t := now()
+	if f.Status == core.FeedDeprecated && t >= f.DeprecatedAt+param("retentionAfterDeprecate") {
+		keep = 0 // a retired feed past its retention keeps nothing
+	}
 	var deleted int64
 	next := f.OldestRound
 	for deleted < maxRounds && next <= f.LastFinalized {
@@ -266,12 +288,12 @@ func (*implV1) PruneRounds(_ int, rlm realm, caller address, feedID uint64, maxR
 		}
 		rd := core.GetRound(feedID, next)
 		if rd != nil {
-			if rd.FinalisedAt == 0 || rd.FinalisedAt+retention > t {
+			if rd.FinalisedAt == 0 || rd.FinalisedAt+retention > t || rd.FinalisedAt+f.Spec.DisputeWindow > t {
 				break
 			}
 			if rd.DisputeID != 0 {
-				if d := core.GetDispute(rd.DisputeID); d != nil && d.Status == core.DisputeOpen {
-					break
+				if d := core.GetDispute(rd.DisputeID); d != nil && d.Status != core.DisputeResolved {
+					break // a dispute still needs this round
 				}
 			}
 			st.RoundDelete(feedID, next)
@@ -300,17 +322,33 @@ func (*implV1) PruneFeed(_ int, rlm realm, caller address, feedID uint64) {
 			panic("gnoracle: prune the rounds first")
 		}
 	}
-	left := false
+	// providers: unclaimed rewards forfeit (plan §5.2), ready unbonds are paid
+	// out, records with nothing left are removed (collected first: the tree
+	// must not change while it is iterated)
+	var all []*core.Provider
 	core.IterateProviders(feedID, func(p *core.Provider) bool {
-		if p.Stake != 0 || p.UnbondAmount != 0 || p.Rewards != 0 {
-			left = true
-			return true
-		}
-		st.ProviderDelete(feedID, p.Addr)
+		all = append(all, p)
 		return false
 	})
-	if left {
-		panic("gnoracle: providers still hold funds on this feed")
+	t := now()
+	left := false
+	for _, p := range all {
+		if p.Rewards > 0 {
+			st.RewardForfeit(feedID, p.Addr)
+		}
+		if p.Status == core.ProviderUnbonding && p.UnbondAmount > 0 && t >= p.UnbondReadyAt {
+			st.ProviderPayUnbonded(feedID, p.Addr)
+		}
+		p = core.GetProvider(feedID, p.Addr)
+		if p.Stake != 0 || p.UnbondAmount != 0 {
+			left = true
+			continue
+		}
+		st.ProviderDelete(feedID, p.Addr)
 	}
+	if left {
+		panic("gnoracle: providers still hold stake on this feed")
+	}
+	st.FeedPoolToFees(feedID) // fees metered after deprecation
 	st.FeedDelete(feedID)
 }

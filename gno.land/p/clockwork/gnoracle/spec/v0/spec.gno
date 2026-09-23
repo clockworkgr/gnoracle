@@ -42,6 +42,12 @@ const (
 	MinSubmitWindow   = int64(60)
 	MinDisputeWindow  = int64(2 * 3600)
 	MaxDisputeWindow  = int64(14 * 24 * 3600)
+	// MaxSubmitWindowOneOff bounds a one-off window (a recurring window is
+	// bounded by its interval); without it CloseAt could overflow.
+	MaxSubmitWindowOneOff = int64(30 * 24 * 3600)
+	// MaxAmount bounds every ugnot amount in a spec (1e15 ugnot, one billion
+	// GNOT) so basis-point arithmetic on it cannot overflow int64.
+	MaxAmount = int64(1_000_000_000_000_000)
 	MinResolveLead    = int64(3600)
 	MaxResolveLead    = int64(2 * 365 * 24 * 3600)
 	MinToleranceBps   = int64(1)
@@ -58,6 +64,7 @@ type Limits struct {
 	ReadPriceFloor        int64 // per metered read
 	SubscriptionFloor     int64 // per period, recurring feeds
 	BountyFloor           int64 // one-off feeds
+	MaxDisputeWindow      int64 // 0: the package default; the realm lowers it so unbonding outlasts a dispute
 }
 
 // Spec is a validated feed specification.
@@ -135,6 +142,9 @@ func Parse(text string, now int64, lim Limits) (*Spec, error) {
 	if !root.IsObject() {
 		return nil, errors.New("spec: top level must be an object")
 	}
+	if dup := duplicateKey(text); dup != "" {
+		return nil, errors.New("spec: field " + strconv.Quote(dup) + " appears twice")
+	}
 	p := &parser{root: root}
 	var unknown string
 	root.ObjectEach(func(key string, _ *json.Node) {
@@ -190,6 +200,21 @@ func (s *Spec) validate(now int64, lim Limits) error {
 	if strings.TrimSpace(s.Name) == "" {
 		return errors.New("spec: name is required")
 	}
+	for _, a := range []struct {
+		name string
+		v    int64
+	}{{"readPrice", s.ReadPrice}, {"subscriptionPrice", s.SubscriptionPrice}, {"bounty", s.Bounty}, {"providerMinStake", s.ProviderMinStake}, {"valueAtStake", s.ValueAtStake}} {
+		if a.v < 0 || a.v > MaxAmount {
+			return errors.New("spec: " + a.name + " must be between 0 and 1000000000000000 ugnot")
+		}
+	}
+	maxDispute := MaxDisputeWindow
+	if lim.MaxDisputeWindow > 0 && lim.MaxDisputeWindow < maxDispute {
+		maxDispute = lim.MaxDisputeWindow
+	}
+	if maxDispute < MinDisputeWindow {
+		maxDispute = MinDisputeWindow
+	}
 	switch s.Kind {
 	case KindRecurring:
 		if s.Interval < MinInterval || s.Interval > MaxInterval {
@@ -208,8 +233,8 @@ func (s *Spec) validate(now int64, lim Limits) error {
 		if s.Interval != 0 || s.SubscriptionPrice != 0 {
 			return errors.New("spec: interval and subscriptionPrice are recurring fields")
 		}
-		if s.SubmitWindow < MinSubmitWindow {
-			return errors.New("spec: submitWindow must be at least 60 seconds")
+		if s.SubmitWindow < MinSubmitWindow || s.SubmitWindow > MaxSubmitWindowOneOff {
+			return errors.New("spec: submitWindow must be between 60 seconds and 30 days")
 		}
 		if s.ResolveAt < now+MinResolveLead || s.ResolveAt > now+MaxResolveLead {
 			return errors.New("spec: resolveAt must be between 1 hour and 2 years ahead")
@@ -263,8 +288,8 @@ func (s *Spec) validate(now int64, lim Limits) error {
 	if s.QuarantineBps < s.ToleranceBps || s.QuarantineBps > MaxQuarantineBps {
 		return errors.New("spec: quarantineBps must be between toleranceBps and 10000")
 	}
-	if s.DisputeWindow < MinDisputeWindow || s.DisputeWindow > MaxDisputeWindow {
-		return errors.New("spec: disputeWindow must be between 2 hours and 14 days")
+	if s.DisputeWindow < MinDisputeWindow || s.DisputeWindow > maxDispute {
+		return errors.New("spec: disputeWindow must be between 2 hours and " + strconv.FormatInt(maxDispute/3600, 10) + " hours")
 	}
 	if s.Sponsored {
 		if s.ReadPrice != 0 {
@@ -393,4 +418,60 @@ func (p *parser) strs(key string, maxItems, maxLen int) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// duplicateKey returns the first top-level key that appears twice in text,
+// or "". The JSON parser keeps the last value silently, which would let a
+// spec show voters one value and store another.
+func duplicateKey(text string) string {
+	seen := map[string]bool{}
+	depth, start := 0, 0
+	inStr, esc, expectKey := false, false, false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if inStr {
+			if esc {
+				esc = false
+				continue
+			}
+			if c == '\\' {
+				esc = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+				if depth == 1 && expectKey {
+					j := i + 1
+					for j < len(text) && (text[j] == ' ' || text[j] == '\t' || text[j] == '\n' || text[j] == '\r') {
+						j++
+					}
+					if j < len(text) && text[j] == ':' {
+						key := text[start:i]
+						if seen[key] {
+							return key
+						}
+						seen[key] = true
+						expectKey = false
+					}
+				}
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr, start = true, i+1
+		case '{', '[':
+			depth++
+			if depth == 1 && c == '{' {
+				expectKey = true
+			}
+		case '}', ']':
+			depth--
+		case ',':
+			if depth == 1 {
+				expectKey = true
+			}
+		}
+	}
+	return ""
 }

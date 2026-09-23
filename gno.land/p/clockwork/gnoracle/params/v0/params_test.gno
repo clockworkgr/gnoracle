@@ -50,9 +50,27 @@ func TestSetWithinBoundsAndRateLimit(t *testing.T) {
 	uassert.Error(t, err)
 	_, err = r.Set("missSlashBps", 38) // -49%: fine
 	uassert.NoError(t, err)
-	_, err = r.Set("missSlashBps", 0) // to zero is more than 50% down: refused
+	_, err = r.Set("missSlashBps", 10) // -74%: over
 	uassert.Error(t, err)
-	_, err = r.Set("missSlashBps", 19)
+	_, err = r.Set("missSlashBps", 0) // the bound itself is always reachable (plan §8.4: rates can be turned off)
+	uassert.NoError(t, err)
+	_, err = r.Set("missSlashBps", 19) // from zero any in-bounds value
+	uassert.NoError(t, err)
+	// small values are never trapped: a step of one unit is always allowed
+	for _, v := range []int64{10, 5, 3, 2, 1, 2, 3} {
+		_, err = r.Set("missSlashBps", v)
+		uassert.NoError(t, err)
+	}
+	_, err = r.Set("missSlashBps", 6) // 3 -> 6 is +100%: over
+	uassert.Error(t, err)
+
+	// SetAt: at most one change per parameter per height
+	_, err = r.SetAt("missSlashBps", 4, 100)
+	uassert.NoError(t, err)
+	_, err = r.SetAt("missSlashBps", 5, 100)
+	uassert.Error(t, err)
+	uassert.Equal(t, int64(4), r.Int("missSlashBps"))
+	_, err = r.SetAt("missSlashBps", 5, 101)
 	uassert.NoError(t, err)
 
 	// a fixed parameter (min == max) can only be set to itself

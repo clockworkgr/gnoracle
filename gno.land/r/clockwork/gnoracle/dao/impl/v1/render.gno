@@ -59,7 +59,7 @@ func renderProposal(id uint64) string {
 	b.WriteString("| quorum / threshold | " + i(p.QuorumBps) + " / " + i(p.ThresholdBps) + " bps |\n")
 	b.WriteString("| yes / no / abstain | " + i(p.Yes) + " / " + i(p.No) + " / " + i(p.Abstain) + " (" + i(p.Voters) + " voters) |\n")
 	b.WriteString("| deposit | " + i(p.Deposit) + " |\n\n")
-	b.WriteString("Payload:\n\n```\n" + p.Payload + "\n```\n")
+	b.WriteString("Payload:\n\n```\n" + strings.ReplaceAll(p.Payload, "`", "'") + "\n```\n")
 	return b.String()
 }
 

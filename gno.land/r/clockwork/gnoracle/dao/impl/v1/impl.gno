@@ -76,7 +76,26 @@ func (*implV1) Withdraw(_ int, rlm realm, member address) int64 {
 		panic("dao: the cooldown has not passed")
 	}
 	settle(st, m, param("settleMaxN"), true)
+	if seq := openObligation(m); seq != 0 {
+		panic("dao: ballot " + u(seq) + " still obligates this stake; withdraw after it resolves")
+	}
 	return st.MemberPayUnbonded(member)
+}
+
+// openObligation returns an unresolved ballot the member holds weight in,
+// or 0. Ballots below the cursor are resolved by construction.
+func openObligation(m *dao.Member) uint64 {
+	total := dao.BallotCount()
+	for seq := m.Cursor + 1; seq <= total; seq++ {
+		b := dao.GetBallot(seq)
+		if b == nil || b.Phase == dao.BallotResolved {
+			continue
+		}
+		if dao.PowerAt(m.Addr, b.SealedEpoch) > 0 {
+			return seq
+		}
+	}
+	return 0
 }
 
 // SettleMember processes up to maxN resolved ballots for a member. The caller
@@ -134,8 +153,8 @@ func settle(st *dao.StateRef, m *dao.Member, maxN int64, strict bool) int64 {
 	for cursor < total && done < maxN {
 		seq := cursor + 1
 		b := dao.GetBallot(seq)
-		if b == nil || b.Phase != dao.BallotResolved {
-			break // an open ballot blocks the cursor until it resolves
+		if b == nil || b.Phase != dao.BallotResolved || !b.Final {
+			break // an open or not yet funded ballot blocks the cursor until the core applies it
 		}
 		cursor = seq
 		done++
@@ -165,15 +184,22 @@ func settle(st *dao.StateRef, m *dao.Member, maxN int64, strict bool) int64 {
 			penalty := tally.Penalty(w, class, rates)
 			penalty = capPenalty(st, m, penalty)
 			if penalty > 0 {
-				st.MemberPenalise(m.Addr, penalty)
+				// a ballot without coherent voters (a rolled round) has no
+				// claimant for its penalties: they go to the treasury
+				st.MemberPenalise(m.Addr, penalty, b.CoherentWeight == 0)
 			}
 		}
 	}
 	if done > 0 {
 		st.MemberSetCursor(m.Addr, cursor)
 	}
+	// strict callers must not leave processable ballots behind; a ballot
+	// that is still running or not yet funded is not processable and must
+	// not block stake changes (weights are sealed per epoch anyway)
 	if strict && cursor < total {
-		panic("dao: settle pending disputes first (SettleMember)")
+		if next := dao.GetBallot(cursor + 1); next != nil && next.Phase == dao.BallotResolved && next.Final {
+			panic("dao: settle pending disputes first (SettleMember)")
+		}
 	}
 	return done
 }

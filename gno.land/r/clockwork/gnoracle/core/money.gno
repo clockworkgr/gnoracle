@@ -70,6 +70,9 @@ func (r *StateRef) send(to address, amount int64) {
 	if amount <= 0 {
 		panic("core: send needs a positive amount")
 	}
+	if r.rlm.PkgPath() != selfPath {
+		panic("core: extensions may read and write state but not move coins")
+	}
 	if amount > Balance() {
 		panic("core: insufficient realm balance")
 	}
@@ -80,8 +83,8 @@ func (r *StateRef) send(to address, amount int64) {
 // ForwardFees sends the pending staker and treasury shares to the DAO realm
 // once one is configured. Anyone may call it; nothing moves without a DAO.
 func ForwardFees(cur realm) int64 {
-	dao := ParamStr("daoRealm")
-	if dao == "" || held.FeesPending == 0 {
+	dao := DAOPath
+	if held.FeesPending == 0 {
 		return 0
 	}
 	amount := held.FeesPending

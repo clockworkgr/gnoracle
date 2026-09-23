@@ -37,8 +37,10 @@ func kindRules(kind string) (rules, bool) {
 		return rules{1500, 5000, day, 0}, true
 	case "freeze", "authority-transfer":
 		return rules{3000, 7500, 14 * day, 7 * day}, true
-	case "trusted-requester":
+	case "trusted-requester", "kourt-abandon":
 		return rules{2000, 5000, 5 * day, 0}, true
+	case "vesting":
+		return rules{2500, 6600, 5 * day, 2 * day}, true
 	case "text":
 		return rules{1000, 5000, 5 * day, 0}, true
 	}
@@ -148,7 +150,7 @@ func (*implV1) Execute(_ int, rlm realm, caller address, proposalID uint64) {
 		total := dao.TotalPowerAt(p.SealedEpoch)
 		quorate := total > 0 && turnout*10_000 >= total*p.QuorumBps
 		sides := p.Yes + p.No
-		passed := quorate && p.Yes > 0 && sides > 0 && p.Yes*10_000 >= sides*p.ThresholdBps
+		passed := quorate && p.Yes > 0 && sides > 0 && p.Yes*10_000 > sides*p.ThresholdBps // strictly more than the bar (plan §8.3)
 		if !quorate {
 			st.ProposalDepositForfeit(proposalID)
 			st.ProposalSetStatus(proposalID, dao.ProposalRejected, "no quorum")
@@ -162,7 +164,7 @@ func (*implV1) Execute(_ int, rlm realm, caller address, proposalID uint64) {
 		st.ProposalSetStatus(proposalID, dao.ProposalPassed, "")
 	}
 	if t < p.Executable {
-		panic("dao: timelocked until " + i(p.Executable))
+		return // tallied and recorded; execution waits for the timelock
 	}
 	if t > p.Expires {
 		st.ProposalSetStatus(proposalID, dao.ProposalExpired, "not executed in time")
@@ -229,8 +231,8 @@ func parseAddr(s, what string) address {
 }
 
 func parseRealm(s string) string {
-	if s != "core" && s != "dao" {
-		panic("dao: realm must be core or dao")
+	if s != "core" && s != "dao" && s != "kourt" {
+		panic("dao: realm must be core, dao or kourt")
 	}
 	return s
 }
@@ -288,9 +290,12 @@ func validatePayload(kind, payload string) {
 	case "authority-transfer":
 		f := fields(payload, 2)
 		parseRealm(f[0])
-		if f[0] == "core" && (len(f) < 2 || f[1] == "") {
-			panic("dao: authority-transfer core needs a comma-separated list of realm paths")
+		if (f[0] == "core" || f[0] == "kourt") && (len(f) < 2 || f[1] == "") {
+			panic("dao: authority-transfer " + f[0] + " needs a comma-separated list of realm paths")
 		}
+	case "kourt-abandon":
+		f := fields(payload, 2)
+		parseUint(f[0], "dispute id")
 	case "trusted-requester":
 		f := fields(payload, 2)
 		if len(f) < 2 || !strings.HasPrefix(f[0], "gno.land/r/") {
@@ -298,6 +303,12 @@ func validatePayload(kind, payload string) {
 		}
 		if parseInt(f[1], "cap") < 0 {
 			panic("dao: cap must not be negative")
+		}
+	case "vesting":
+		f := fields(payload, 3)
+		parseAddr(f[0], "member")
+		if parseInt(f[1], "until") < 0 || parseInt(f[2], "floor") < 0 {
+			panic("dao: vesting terms must not be negative")
 		}
 	case "text":
 	}
@@ -379,33 +390,51 @@ func apply(st *dao.StateRef, p *dao.Proposal) {
 		st.Mint(to, amount, year)
 	case "upgrade-accept":
 		f := fields(p.Payload, 2)
-		if f[0] == "core" {
+		switch f[0] {
+		case "core":
 			st.CoreAccept(f[1])
-		} else {
+		case "kourt":
+			st.KourtAccept(f[1])
+		default:
 			st.ExecOwn("accept", f[1])
 		}
 	case "upgrade-rollback":
-		if fields(p.Payload, 1)[0] == "core" {
+		switch fields(p.Payload, 1)[0] {
+		case "core":
 			st.CoreRollback()
-		} else {
+		case "kourt":
+			st.KourtRollback()
+		default:
 			st.ExecOwn("rollback", "")
 		}
 	case "freeze":
-		if fields(p.Payload, 1)[0] == "core" {
+		switch fields(p.Payload, 1)[0] {
+		case "core":
 			st.CoreFreeze()
-		} else {
+		case "kourt":
+			st.KourtFreeze()
+		default:
 			st.ExecOwn("freeze", "")
 		}
 	case "authority-transfer":
 		f := fields(p.Payload, 2)
-		if f[0] == "core" {
+		switch f[0] {
+		case "core":
 			st.CoreTransferAuthority(f[1])
-		} else {
+		case "kourt":
+			st.KourtTransferAuthority(f[1])
+		default:
 			st.ExecOwn("authority", "")
 		}
+	case "kourt-abandon":
+		f := fields(p.Payload, 2)
+		st.KourtAbandon(parseUint(f[0], "dispute id"), f[1])
 	case "trusted-requester":
 		f := fields(p.Payload, 2)
 		st.CoreSetTrustedRequester(f[0], parseInt(f[1], "cap"))
+	case "vesting":
+		f := fields(p.Payload, 3)
+		st.MemberSetVesting(parseAddr(f[0], "member"), parseInt(f[1], "until"), parseInt(f[2], "floor"))
 	case "text":
 		// nothing to apply
 	default:

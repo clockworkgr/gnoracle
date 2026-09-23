@@ -121,6 +121,7 @@ func install(cur realm) {
 	// lower the core stake floor for the feed stories (rate limited)
 	for _, v := range []int64{5_000 * gnot, 2_500 * gnot, 1_250 * gnot, 1_000 * gnot} {
 		core.SetParam(cross(cur), "providerMinStakeFloor", v)
+		testing.SkipHeights(1) // parameters change at most once per height
 	}
 }
 
@@ -273,8 +274,8 @@ func TestProposalsActOnTheCore(cur realm, t *testing.T) {
 	skip(5*day + 5)
 	testing.SetRealm(testing.NewUserRealm(stranger))
 	nosend()
-	uassert.AbortsContains(t, cur, "timelocked", func() { dao.Execute(cross(cur), p1) })
-	uassert.Equal(t, dao.ProposalPassed, dao.GetProposal(p1).Status) // tallied on the first call
+	dao.Execute(cross(cur), p1) // before the timelock: tallies and records, executes nothing
+	uassert.Equal(t, dao.ProposalPassed, dao.GetProposal(p1).Status)
 	skip(2*day + 5)
 	dao.Execute(cross(cur), p1)
 	dao.Execute(cross(cur), p2)
@@ -328,7 +329,8 @@ func TestTreasuryMintAndSelfUpgrade(cur realm, t *testing.T) {
 	dao.Execute(cross(cur), tp)                                     // 5 d vote + 2 d lock have passed
 	uassert.Equal(t, int64(1_900_000*pyth), token.BalanceOf(carol)) // 1M genesis - 100k staked + 1M from the treasury
 	uassert.Equal(t, int64(39_000_000*pyth), dao.TreasuryPyth())
-	uassert.AbortsContains(t, cur, "timelocked", func() { dao.Execute(cross(cur), mp) }) // 7 d vote + 7 d lock
+	dao.Execute(cross(cur), mp) // 7 d vote + 7 d lock: tallied, not yet executed
+	uassert.Equal(t, dao.ProposalPassed, dao.GetProposal(mp).Status)
 	skip(7*day + 5)
 	supplyBefore := token.TotalSupply()
 	dao.Execute(cross(cur), mp)

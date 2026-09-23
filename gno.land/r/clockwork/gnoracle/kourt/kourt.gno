@@ -13,6 +13,7 @@ package kourt
 
 import (
 	"chain"
+	"chain/banker"
 	"strconv"
 	"strings"
 
@@ -39,11 +40,13 @@ const (
 	StateContested = "contested" // a Kourt holder disputed the answer
 	StateDissent   = "dissent"   // Kourt's vote disagreed with the DAO
 	StateConfirmed = "confirmed" // Kourt's vote agreed with the DAO
+	StateAbandoned = "abandoned" // closed by the authority: the claim died or the binding changed
 )
 
 // Record is one dispute's mirror.
 type Record struct {
 	Dispute    uint64
+	Binding    string // the Kourt realm and court the claim lives in ("<realm path>#<slug>")
 	State      string
 	ClaimID    uint64
 	Title      string
@@ -158,13 +161,13 @@ func (r *StateRef) Realm() realm {
 	return r.rlm
 }
 
-// NewRecord starts a mirror record for a dispute.
-func (r *StateRef) NewRecord(disputeID uint64, title string) *Record {
+// NewRecord starts a mirror record for a dispute in the release's binding.
+func (r *StateRef) NewRecord(disputeID uint64, binding, title string) *Record {
 	r.check()
 	if GetRecord(disputeID) != nil {
 		panic("kourt: record exists")
 	}
-	rec := &Record{Dispute: disputeID, State: StatePending, Title: title}
+	rec := &Record{Dispute: disputeID, Binding: binding, State: StatePending, Title: title}
 	records.Set(key(disputeID), rec)
 	count++
 	emit("KourtRecord", "dispute", strconv.FormatUint(disputeID, 10), "state", StatePending)
@@ -202,6 +205,41 @@ func (r *StateRef) Set(disputeID uint64, state string, claimID uint64, at int64,
 	}
 }
 
+// Abandon closes a record the current release cannot advance: a claim that
+// died on Kourt, or a record filed under a previous binding. Authority only;
+// the court coin staked on it stays where Kourt left it.
+func Abandon(cur realm, disputeID uint64, reason string) {
+	proxy.AssertAuthorized(0, cur)
+	rec := GetRecord(disputeID)
+	if rec == nil {
+		panic("kourt: unknown record")
+	}
+	switch rec.State {
+	case StateSettled, StateConfirmed, StateDissent, StateAbandoned:
+		panic("kourt: record is already closed")
+	}
+	rec.State = StateAbandoned
+	rec.Route = reason
+	rec.Steps++
+	emit("KourtRecord", "dispute", strconv.FormatUint(disputeID, 10), "state", StateAbandoned, "claim", strconv.FormatUint(rec.ClaimID, 10))
+}
+
+// SendToTreasury moves GNOT this realm holds (a redeemed float) to the DAO.
+// The implementation reports the amount; the permanent realm moves the coins.
+func (r *StateRef) SendToTreasury(amount int64) {
+	r.check()
+	if amount <= 0 {
+		panic("kourt: amount must be positive")
+	}
+	if r.rlm.PkgPath() != selfPath {
+		panic("kourt: extensions may not move coins")
+	}
+	rlm := r.rlm
+	b := banker.NewBanker(banker.BankerTypeRealmSend, rlm)
+	b.SendCoins(rlm.Address(), chain.PackageAddress(DAOPath), chain.NewCoins(chain.NewCoin("ugnot", amount)))
+	emit("FloatRedeemed", "amount", strconv.FormatInt(amount, 10))
+}
+
 // Emit lets the implementation emit under this realm's path.
 func (r *StateRef) Emit(typ string, attrs ...string) {
 	r.check()
@@ -221,19 +259,42 @@ func Accept(cur realm, pkgPath string) { proxy.Accept(0, cur, pkgPath) }
 // Rollback restores the previous release. Authority only.
 func Rollback(cur realm) { proxy.Rollback(0, cur) }
 
-// Freeze ends upgradeability. Authority only.
-func Freeze(cur realm) { proxy.Freeze(0, cur) }
+// WithdrawImpl removes a pending candidate. Authority only.
+func WithdrawImpl(cur realm, pkgPath string) { proxy.Withdraw(0, cur, pkgPath) }
 
-// TransferAuthorityToRealms hands the authority to governance realm paths.
+// Forget drops the rollback history. Authority only.
+func Forget(cur realm) { proxy.Forget(0, cur) }
+
+// Freeze ends upgradeability. Authority only, and only once a realm (the
+// DAO) holds the authority: freezing also fixes the authority for good.
+func Freeze(cur realm) {
+	proxy.AssertAuthorized(0, cur)
+	if !strings.HasPrefix(proxy.Authority().String(), "realms:") {
+		panic("kourt: hand the authority to the DAO realm before freezing")
+	}
+	proxy.Freeze(0, cur)
+}
+
+// TransferAuthorityToRealms hands the authority to governance realm paths,
+// which must include the DAO (a typo would lock the realm for good).
 func TransferAuthorityToRealms(cur realm, csvPaths string) {
+	proxy.AssertAuthorized(0, cur)
 	parts := strings.Split(csvPaths, ",")
 	paths := make([]string, 0, len(parts))
+	hasDAO := false
 	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
 			paths = append(paths, p)
+			if p == DAOPath {
+				hasDAO = true
+			}
 		}
 	}
+	if !hasDAO {
+		panic("kourt: the realm authority must include " + DAOPath)
+	}
 	proxy.TransferAuthority(0, cur, upgradeable.NewRealmAuthority(paths...))
+	emit("AuthorityTransferred", "realm", "kourt", "authority", strings.Join(paths, ","))
 }
 
 // LivePath is the implementation currently serving.
@@ -266,8 +327,14 @@ func live() Mirror {
 // Render shows the mirror records with the Kourt attribution the licence
 // asks for on every page that displays a claim.
 func Render(cur realm, path string) string {
-	if _, ok := proxy.TryImpl(); !ok {
-		return "# Gnoracle Kourt mirror\n\n_No implementation accepted yet._\n"
+	// the attribution the Kourt licence asks for lives in the permanent
+	// realm, so no release can drop it
+	head := "[built on Kourt](https://kourt.xyz)\n\n"
+	if strings.HasPrefix(path, "json") {
+		head = "" // machine views stay pure JSON
 	}
-	return live().Render(0, cur, path)
+	if _, ok := proxy.TryImpl(); !ok {
+		return head + "# Gnoracle Kourt mirror\n\n_No implementation accepted yet._\n"
+	}
+	return head + live().Render(0, cur, path)
 }

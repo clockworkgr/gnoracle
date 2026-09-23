@@ -226,6 +226,10 @@ func Forget(cur realm) { proxy.Forget(0, cur) }
 
 // Freeze ends upgradeability for good. Authority only.
 func Freeze(cur realm) {
+	proxy.AssertAuthorized(0, cur)
+	if !strings.HasPrefix(proxy.Authority().String(), "realms:") {
+		panic("dao: hand the authority to the exec trampoline (TransferAuthorityToExec) before freezing")
+	}
 	proxy.Freeze(0, cur)
 	emit("Frozen", "realm", "dao")
 }
@@ -243,6 +247,14 @@ func TransferAuthority(cur realm, newOwner address) {
 		upgradeable.NewRealmAuthority(ExecPath),
 	))
 	emit("AuthorityTransferred", "realm", "dao", "authority", string(newOwner)+"|"+ExecPath)
+}
+
+// SetVesting records a member's vesting terms: floor stays staked until
+// until (the founders' allocation, plan §9.1). Authority only, before the
+// handover; afterwards the `vesting` proposal kind.
+func SetVesting(cur realm, member address, until, floor int64) {
+	proxy.AssertAuthorized(0, cur)
+	setVesting(member, until, floor)
 }
 
 // TransferAuthorityToExec leaves only the exec trampoline: from then on only

@@ -18,6 +18,12 @@ import (
 // Scale is the fixed-point scale of accPerShare.
 const Scale = int64(1_000_000_000_000) // 1e12
 
+// MaxAccPerShare caps the accumulator so Shares*accPerShare stays within
+// int64 for share counts up to 200*Scale (2e14, above the PYTH supply of
+// 1.2e14 base units). Bumps that would pass it wait in carry until more
+// shares exist.
+const MaxAccPerShare = int64(1<<63-1) / 200
+
 // Add returns a + b or panics with a stable message on overflow or a negative
 // result.
 func Add(a, b int64) int64 {
@@ -113,7 +119,7 @@ func (a *Accumulator) Bump(amount int64) {
 		return
 	}
 	next, ok := overflow.Add64(a.accPerShare, int64(inc))
-	if !ok {
+	if !ok || next > MaxAccPerShare {
 		a.carry = total
 		return
 	}

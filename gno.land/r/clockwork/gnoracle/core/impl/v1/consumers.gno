@@ -37,9 +37,6 @@ func servedTier(f *core.Feed, t int64) string {
 			tier = "final"
 		}
 	}
-	if f.OpenDisputes > 0 {
-		tier = "disputed"
-	}
 	if f.Spec.IsRecurring() && rounds.Stale(f.LastRoundAt, t, 2*f.Spec.Interval) {
 		tier = "stale"
 	}
@@ -71,31 +68,57 @@ func charge(st *core.StateRef, consumer address, f *core.Feed, finalOnly bool, t
 }
 
 // Read returns the latest served value.
+//
+// The latest aggregate is served with its tier. While the latest round is
+// disputed, and after it was voided, the last final round is served instead
+// (a captured vote can freeze the feed but not inject a value, plan §7.1); a
+// finalOnly consumer always gets the last final round. Nothing is charged
+// when nothing is served.
 func (*implV1) Read(_ int, rlm realm, consumer address, feedID uint64) (int64, int64, uint64, int64, string) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
-	if f.Status == core.FeedProposed {
+	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
 		panic("gnoracle: feed is not active")
 	}
 	t := now()
+	dec := int64(f.Spec.Decimals)
 	c := core.GetCredit(consumer)
 	finalOnly := c != nil && c.FinalOnly
-	charge(st, consumer, f, finalOnly, t)
+	st.FeedPromoteFinal(feedID)
+	f = mustFeed(feedID)
 	tier := servedTier(f, t)
-	if !f.HaveValue {
-		return 0, int64(f.Spec.Decimals), 0, 0, tier
+	suffix := ""
+	if f.Status == core.FeedUnfunded {
+		suffix = ",unfunded"
 	}
-	if finalOnly && !hasPrefix(tier, "final") {
-		return 0, int64(f.Spec.Decimals), 0, 0, "none"
+	switch {
+	case finalOnly:
+		if !f.HaveFinal {
+			return 0, dec, 0, 0, "none"
+		}
+		charge(st, consumer, f, true, t)
+		return f.FinalValue, dec, f.FinalRound, f.FinalAt, "final" + suffix
+	case !f.HaveValue:
+		return 0, dec, 0, 0, tier
+	case f.LastTier == "disputed" || f.LastTier == "void":
+		if !f.HaveFinal {
+			return 0, dec, 0, 0, tier
+		}
+		charge(st, consumer, f, false, t)
+		if f.LastTier == "void" {
+			tier = "final" + suffix
+		}
+		return f.FinalValue, dec, f.FinalRound, f.FinalAt, tier
 	}
-	return f.LastValue, int64(f.Spec.Decimals), f.LastRound, f.LastRoundAt, tier
+	charge(st, consumer, f, false, t)
+	return f.LastValue, dec, f.LastRound, f.LastRoundAt, tier
 }
 
 // ReadRound returns one round.
 func (*implV1) ReadRound(_ int, rlm realm, consumer address, feedID, roundID uint64) (int64, string, int64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
-	if f.Status == core.FeedProposed {
+	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
 		panic("gnoracle: feed is not active")
 	}
 	t := now()

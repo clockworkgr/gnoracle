@@ -7,6 +7,7 @@
 package params
 
 import (
+	"gno.land/p/clockwork/gnoracle/jsonw/v0"
 	"errors"
 	"strconv"
 	"strings"
@@ -30,10 +31,11 @@ type Def struct {
 
 // Registry holds definitions and current values.
 type Registry struct {
-	defs   *avl.Tree // name -> *Def
-	values *avl.Tree // name -> int64
-	strs   *avl.Tree // name -> string (free-form parameters, e.g. a denom)
-	order  []string  // definition order, for rendering
+	defs    *avl.Tree // name -> *Def
+	values  *avl.Tree // name -> int64
+	strs    *avl.Tree // name -> string (free-form parameters, e.g. a denom)
+	changed *avl.Tree // name -> int64 height of the last change (SetAt)
+	order   []string  // definition order, for rendering
 }
 
 // New returns an empty registry.
@@ -115,22 +117,42 @@ func (r *Registry) Check(name string, value int64) error {
 		return errors.New("params: " + name + " out of bounds [" + strconv.FormatInt(d.Min, 10) + ", " + strconv.FormatInt(d.Max, 10) + "]")
 	}
 	old := r.values.Get(name).(int64)
-	if d.MaxChangeBps > 0 && old > 0 {
+	// the rate limit never traps a value: the bounds themselves are always
+	// reachable, and a step of one unit is always allowed
+	if d.MaxChangeBps > 0 && old > 0 && value != d.Min && value != d.Max {
 		diff := value - old
 		if diff < 0 {
 			diff = -diff
 		}
-		// diff * Bps <= old * MaxChangeBps; values are bounded so this cannot overflow in practice,
-		// but compare via division to stay safe: diff <= old * MaxChangeBps / Bps (floor) means a
-		// change of exactly the allowed fraction passes.
+		// diff <= old * MaxChangeBps / Bps (floor), computed without overflow
 		limit := old / Bps * d.MaxChangeBps
 		rem := old % Bps * d.MaxChangeBps / Bps
 		limit += rem
+		if limit < 1 {
+			limit = 1
+		}
 		if diff > limit {
 			return errors.New("params: " + name + " changes by more than " + strconv.FormatInt(d.MaxChangeBps, 10) + " bps of its current value")
 		}
 	}
 	return nil
+}
+
+// SetAt is Set with a rate limit per block: a parameter changes at most once
+// per height, so the per-call change limit cannot be chained inside one
+// transaction. Realms pass the chain height.
+func (r *Registry) SetAt(name string, value int64, height int64) (old int64, err error) {
+	if r.changed == nil {
+		r.changed = avl.NewTree()
+	}
+	if v := r.changed.Get(name); v != nil && v.(int64) == height {
+		return 0, errors.New("params: " + name + " already changed at this height")
+	}
+	old, err = r.Set(name, value)
+	if err == nil {
+		r.changed.Set(name, height)
+	}
+	return old, err
 }
 
 // Set changes an integer parameter after Check. It returns the old value.
@@ -210,7 +232,7 @@ func (r *Registry) JSON() string {
 		}
 		b.WriteString("\"" + n + "\":")
 		if r.strs.Has(n) {
-			b.WriteString(strconv.Quote(r.strs.Get(n).(string)))
+			b.WriteString(jsonw.Quote(r.strs.Get(n).(string)))
 		} else {
 			b.WriteString(strconv.FormatInt(r.values.Get(n).(int64), 10))
 		}

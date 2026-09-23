@@ -101,6 +101,7 @@ type Ballot struct {
 	ResolvedAt     int64
 	TopReveals     string // packed heaviest reveals for clipping (impl-defined encoding)
 	PrevSeq        uint64 // the round-1 ballot this round-2 ballot follows
+	Final          bool   // the core applied the outcome (or the round rolled): rewards are fully funded, settle may run
 }
 
 // ------------------------------------------------------------- tables ----
@@ -310,9 +311,14 @@ func (r *StateRef) MemberStake(addr address, amount int64) *Member {
 	if amount <= 0 {
 		panic("dao: amount must be positive")
 	}
+	// attribute coins that arrived before this share change to the shares
+	// that earned them
+	r.FeesSync()
 	m := GetMember(addr)
 	if m == nil {
-		m = &Member{Addr: addr, JoinedAt: Now(), PenaltyWindowAt: Now()}
+		// a newcomer owes nothing for ballots sealed before its weight exists
+		// (weight starts at Epoch()+1), so its cursor starts at the end
+		m = &Member{Addr: addr, JoinedAt: Now(), PenaltyWindowAt: Now(), Cursor: BallotCount()}
 		members.Set(string(addr), m)
 	}
 	r.pullPyth(addr, amount)
@@ -331,6 +337,10 @@ func (r *StateRef) MemberUnstake(addr address, amount int64, readyAt int64) {
 	if amount <= 0 || amount > m.Staked {
 		panic("dao: amount exceeds the stake")
 	}
+	if m.UnbondAmount > 0 {
+		panic("dao: an unbonding amount is pending; Withdraw it first")
+	}
+	r.FeesSync()
 	fees.Withdraw(&m.fee, amount)
 	m.Staked -= amount
 	m.UnbondAmount += amount
@@ -356,14 +366,16 @@ func (r *StateRef) MemberPayUnbonded(addr address) int64 {
 }
 
 // MemberPenalise takes amount from stake first, then from unbonding, and
-// credits it to the PYTH reward pool for coherent voters. Returns the amount
-// actually taken.
-func (r *StateRef) MemberPenalise(addr address, amount int64) int64 {
+// credits it to the PYTH reward pool for coherent voters, or to the treasury
+// when the ballot has no coherent voter to pay (a rolled round). Returns the
+// amount actually taken.
+func (r *StateRef) MemberPenalise(addr address, amount int64, toTreasury bool) int64 {
 	r.check()
 	m := mustMember(addr)
 	if amount <= 0 {
 		return 0
 	}
+	r.FeesSync()
 	taken := int64(0)
 	fromStake := amount
 	if fromStake > m.Staked {
@@ -384,7 +396,9 @@ func (r *StateRef) MemberPenalise(addr address, amount int64) int64 {
 		held.UnbondingPyth -= rest
 		taken += rest
 	}
-	held.RewardPyth += taken
+	if !toTreasury {
+		held.RewardPyth += taken
+	}
 	m.TotalPenalised += taken
 	if taken > 0 {
 		power.Set(string(addr), Epoch()+1, m.Staked)
@@ -406,19 +420,31 @@ func (r *StateRef) MemberCreditReward(addr address, pyth, ugnot int64) {
 }
 
 // MemberPayRewards pays a member's pending dispute rewards.
+// The PYTH leg is paid from the penalty pool first and the treasury next
+// (plan §8.4); whatever neither can cover stays pending and is reported. The
+// ugnot leg never waits on the PYTH leg.
 func (r *StateRef) MemberPayRewards(addr address) (pyth, ugnot int64) {
 	r.check()
 	m := mustMember(addr)
 	pyth, ugnot = m.PendingPyth, m.PendingUgnot
-	m.PendingPyth, m.PendingUgnot = 0, 0
 	if pyth > 0 {
-		if pyth > held.RewardPyth {
-			panic("dao: reward pool short")
+		available := held.RewardPyth + TreasuryPyth()
+		if pyth > available {
+			emit("RewardShortfall", "member", string(addr), "pending", strconv.FormatInt(pyth, 10), "available", strconv.FormatInt(available, 10))
+			pyth = available
 		}
-		held.RewardPyth -= pyth
-		r.sendPyth(addr, pyth)
+		if pyth > 0 {
+			fromPool := pyth
+			if fromPool > held.RewardPyth {
+				fromPool = held.RewardPyth
+			}
+			held.RewardPyth -= fromPool
+			m.PendingPyth -= pyth
+			r.sendPyth(addr, pyth)
+		}
 	}
 	if ugnot > 0 {
+		m.PendingUgnot = 0
 		held.RewardUgnot -= ugnot
 		r.sendUgnot(addr, ugnot)
 	}
@@ -442,9 +468,17 @@ func (r *StateRef) MemberSetPenaltyWindow(addr address, at, inWindow int64) {
 // MemberSetVesting records a founder's vesting terms.
 func (r *StateRef) MemberSetVesting(addr address, until, floor int64) {
 	r.check()
+	setVesting(addr, until, floor)
+}
+
+func setVesting(addr address, until, floor int64) {
+	if until < 0 || floor < 0 {
+		panic("dao: vesting terms must not be negative")
+	}
 	m := mustMember(addr)
 	m.VestedUntil = until
 	m.VestFloor = floor
+	emit("MemberVesting", "member", string(addr), "until", strconv.FormatInt(until, 10), "floor", strconv.FormatInt(floor, 10))
 }
 
 // MemberPayFees pays a member's fee share.
@@ -500,6 +534,7 @@ func (r *StateRef) NewProposal(kind, payload, title string, proposer address, se
 		QuorumBps: quorumBps, ThresholdBps: thresholdBps, Status: ProposalActive, Deposit: deposit}
 	proposals.Set(u64key(id), p)
 	held.DepositUgnot += deposit
+	held.KnownUgnot += deposit // the deposit arrived with the call and is not fee income
 	emit("ProposalCreated", "id", strconv.FormatUint(id, 10), "kind", kind, "proposer", string(proposer))
 	return p
 }
@@ -573,8 +608,7 @@ func (r *StateRef) TreasurySendUgnot(to address, amount int64) {
 	if amount <= 0 || amount > TreasuryUgnot() {
 		panic("dao: treasury ugnot insufficient")
 	}
-	held.KnownUgnot -= amount
-	r.sendUgnot(to, amount)
+	r.sendUgnot(to, amount) // sendUgnot keeps KnownUgnot in step
 }
 
 // TreasurySendPyth pays from the treasury's PYTH.
@@ -674,18 +708,27 @@ func (r *StateRef) BallotResolve(seq uint64, outcome, tier string, uphold, overt
 	b.ClippedAway = clipped
 	b.BondShareUgnot += bondShare
 	b.ResolvedAt = Now()
+	if outcome == "ROLL" {
+		b.Final = true // nothing further will be funded for a rolled round
+	}
 	held.RewardUgnot += bondShare
 	emit("DisputeBallotResolved", "ballot", strconv.FormatUint(seq, 10), "dispute", strconv.FormatUint(b.Dispute, 10), "outcome", outcome, "tier", tier)
 }
 
-// BallotFund records coins that arrived for a ballot's coherent voters.
+// BallotFund records coins that arrived for a ballot's coherent voters and
+// marks the ballot final: the core calls it once when it applies the
+// outcome, with the voters' share (possibly zero).
 func (r *StateRef) BallotFund(seq uint64, amount int64) {
 	r.check()
 	b := GetBallot(seq)
 	if b == nil {
 		panic("dao: unknown ballot")
 	}
-	if amount <= 0 {
+	if amount < 0 {
+		panic("dao: amount must not be negative")
+	}
+	b.Final = true
+	if amount == 0 {
 		return
 	}
 	b.BondShareUgnot += amount

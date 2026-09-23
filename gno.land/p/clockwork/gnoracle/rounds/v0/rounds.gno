@@ -107,7 +107,11 @@ func (s Schedule) IsClosed(id uint64, now int64) bool {
 
 // Exists reports whether round id has opened by now.
 func (s Schedule) Exists(id uint64, now int64) bool {
-	if s.IsOneOff() && id != 0 {
+	if s.IsOneOff() {
+		return id == 0 && now >= s.StartAt
+	}
+	// an id whose open time does not fit int64 has certainly not opened
+	if id > uint64(1<<62) || int64(id) > (int64(1<<63-1)-s.StartAt)/s.Interval {
 		return false
 	}
 	return now >= s.OpenAt(id)

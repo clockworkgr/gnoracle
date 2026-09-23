@@ -99,6 +99,7 @@ func install(cur realm) {
 	token.Transfer(cross(cur), bob, 1_000_000*pyth)
 	for _, v := range []int64{5_000 * gnot, 2_500 * gnot, 1_250 * gnot, 1_000 * gnot} {
 		core.SetParam(cross(cur), "providerMinStakeFloor", v)
+		testing.SkipHeights(1) // parameters change at most once per height
 	}
 	// members stake so disputes have an electorate
 	for _, m := range []address{alice, bob} {

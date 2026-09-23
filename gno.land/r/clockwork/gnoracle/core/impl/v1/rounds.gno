@@ -85,7 +85,7 @@ func obligedHolder(f *core.Feed, s int, id uint64) *core.Provider {
 func (*implV1) Finalize(_ int, rlm realm, caller address, feedID, roundID uint64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
-	if f.Status == core.FeedProposed {
+	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
 		panic("gnoracle: feed is not active")
 	}
 	next := uint64(0)
@@ -114,7 +114,7 @@ func (*implV1) Finalize(_ int, rlm realm, caller address, feedID, roundID uint64
 func (*implV1) CatchUp(_ int, rlm realm, caller address, feedID uint64, maxRounds int64) int64 {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
-	if f.Status == core.FeedProposed {
+	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
 		panic("gnoracle: feed is not active")
 	}
 	limit := param("maxCatchUpRounds")
@@ -205,9 +205,14 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 	}
 	tier := agg.TierEmpty
 	if ok {
+		// the quarantine reference is the last final value, not the last
+		// aggregate (a provisional jump must not become the reference)
+		st.FeedPromoteFinal(f.ID)
+		f = mustFeed(f.ID)
 		tier = agg.DecideTier(agg.TierInput{
 			Eligible: count, Active: obliged, MinProviders: sp.MinProviders,
-			Value: value, LastFinal: f.LastValue, HaveLast: f.HaveValue, QuarantineBps: sp.QuarantineBps,
+			Value: value, LastFinal: f.FinalValue, HaveLast: f.HaveFinal, QuarantineBps: sp.QuarantineBps,
+			Categorical: !sp.IsNumeric(),
 		})
 	}
 
@@ -238,7 +243,8 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 		if funded {
 			missSlash(st, f, p, cranker)
 		}
-		if misses >= param("jailAfterMisses") && f.SlotAt(s) == holder {
+		// a one-off has a single round: missing it is the whole job (plan §5.1)
+		if (misses >= param("jailAfterMisses") || !sp.IsRecurring()) && f.SlotAt(s) == holder {
 			jail(st, f, holder, s, id)
 		}
 	}

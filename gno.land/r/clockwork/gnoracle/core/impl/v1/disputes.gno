@@ -25,7 +25,11 @@ func (*implV1) Dispute(_ int, rlm realm, disputer address, feedID, roundID uint6
 		panic("gnoracle: round has no aggregate to dispute")
 	}
 	if rd.DisputeID != 0 {
-		panic("gnoracle: round was already disputed")
+		if d := core.GetDispute(rd.DisputeID); d != nil && d.Status != core.DisputeResolved {
+			panic("gnoracle: round is under dispute")
+		}
+		// a resolved dispute leaves the round open to another one while
+		// its (restarted) window lasts
 	}
 	t := now()
 	if t >= rd.FinalisedAt+f.Spec.DisputeWindow {
@@ -204,11 +208,19 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 			}
 			effTier, effBps := tier, bps
 			if tier == tierMinor {
-				if p := core.GetProvider(d.Feed, holder); p != nil && p.MinorsEpoch+1 >= param("minorsToMajor") {
-					effTier, effBps = tierMajor, param("majorSlashBps")
+				if p := core.GetProvider(d.Feed, holder); p != nil {
+					minors := p.MinorsEpoch
+					if now()-p.EpochStart >= param("providerEpoch") {
+						minors = 0 // the escalation counts within one provider epoch
+					}
+					if minors+1 >= param("minorsToMajor") {
+						effTier, effBps = tierMajor, param("majorSlashBps")
+					}
 				}
 			}
-			slashed += st.SlashProvider(d.Feed, holder, effBps, effTier, d.Round+1)
+			// an ejection clears the slot from the next round on; the holders
+			// of record of past rounds never change
+			slashed += st.SlashProvider(d.Feed, holder, effBps, effTier, obligedFrom(f))
 		}
 		toDisputer := slashed * winnerBps / 10_000
 		toVoters := slashed * votersBps / 10_000
@@ -227,6 +239,9 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 	default:
 		panic("gnoracle: unknown outcome " + outcome)
 	}
+	// tell the ballot house the outcome is applied even when nothing was
+	// routed to voters, so the ballot becomes final and settlement may run
+	st.FundVoters(d.ID, 0)
 	f = mustFeed(d.Feed)
 	st.FeedSetDisputeCounters(d.Feed, f.OpenDisputes-1, f.DisputesInRow, f.LastDisputeAt)
 	st.DisputeSetResolved(d.ID, outcome, tier, coherent, slashed)
@@ -247,8 +262,8 @@ func (*implV1) ReopenOneOff(_ int, rlm realm, caller address, feedID uint64, res
 		panic("gnoracle: already reopened once")
 	}
 	rd := core.GetRound(feedID, 0)
-	if rd == nil || rd.Status != core.RoundVoid {
-		panic("gnoracle: only a voided round reopens")
+	if rd == nil || (rd.Status != core.RoundVoid && rd.Status != core.RoundEmpty && rd.Status != core.RoundSkipped) {
+		panic("gnoracle: only a voided or empty round reopens")
 	}
 	t := now()
 	if resolveAt < t+spec.MinResolveLead || resolveAt > t+spec.MaxResolveLead {

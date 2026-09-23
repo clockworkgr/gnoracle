@@ -157,7 +157,7 @@ func pageArgs(parts []string, defOffset, defCount, maxCount int64) (offset, coun
 }
 
 func jsonNow() *jsonw.Object {
-	return jsonw.New().Int("now", now()).Int("height", runtime.ChainHeight()).Int("epoch", int64(dao.Epoch())).
+	return jsonw.New().Int("now", now()).Int("height", runtime.ChainHeight()).Str("address", string(dao.Address())).Int("epoch", int64(dao.Epoch())).
 		Int("epochBlocks", param("epochBlocks")).Str("live", dao.LivePath()).Int("totalStaked", dao.TotalStaked()).
 		Int("memberCount", int64(dao.MemberCount())).Uint("proposalCount", dao.ProposalCount()).Uint("ballotCount", dao.BallotCount())
 }
@@ -176,7 +176,7 @@ func jsonBallot(seq uint64, b *dao.Ballot) *jsonw.Object {
 		Int("commitEnds", b.CommitEnds).Int("revealEnds", b.RevealEnds).Int("uphold", b.Uphold).Int("overturn", b.Overturn).
 		Int("overturnMinor", b.OverturnMinor).Int("void", b.Void).Int("abstain", b.Abstain).Int("revealed", b.Revealed).
 		Str("outcome", b.Outcome).Str("tier", b.Tier).Int("coherentWeight", b.CoherentWeight).Int("expectedPool", b.ExpectedPool).
-		Int("bondShareUgnot", b.BondShareUgnot).Int("clippedAway", b.ClippedAway).Int("resolvedAt", b.ResolvedAt).Uint("prevSeq", b.PrevSeq)
+		Int("bondShareUgnot", b.BondShareUgnot).Int("clippedAway", b.ClippedAway).Int("resolvedAt", b.ResolvedAt).Uint("prevSeq", b.PrevSeq).Bool("final", b.Final)
 }
 
 func jsonProposal(p *dao.Proposal) *jsonw.Object {

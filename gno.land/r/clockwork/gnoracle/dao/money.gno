@@ -1,11 +1,13 @@
 package dao
 
 import (
+	"chain/runtime"
 	"chain"
 	"chain/banker"
 	"strconv"
 
 	"gno.land/r/clockwork/gnoracle/core"
+	"gno.land/r/clockwork/gnoracle/kourt"
 	"gno.land/r/clockwork/gnoracle/token"
 )
 
@@ -48,6 +50,9 @@ func (r *StateRef) mintPyth(to address, amount int64) {
 func (r *StateRef) sendUgnot(to address, amount int64) {
 	if amount <= 0 {
 		panic("dao: send needs a positive amount")
+	}
+	if r.rlm.PkgPath() != selfPath {
+		panic("dao: extensions may read and write state but not move coins")
 	}
 	if amount > ugnotBalance() {
 		panic("dao: insufficient realm balance")
@@ -160,12 +165,50 @@ func (r *StateRef) CoreTransferAuthority(csvPaths string) {
 	core.TransferAuthorityToRealms(cross(rlm), csvPaths)
 }
 
+// ---- the Kourt mirror realm's releases and authority (proposals)
+
+// KourtAccept executes an upgrade-accept proposal on the mirror realm.
+func (r *StateRef) KourtAccept(path string) {
+	r.check()
+	rlm := r.rlm
+	kourt.Accept(cross(rlm), path)
+}
+
+// KourtRollback executes an upgrade-rollback proposal on the mirror realm.
+func (r *StateRef) KourtRollback() {
+	r.check()
+	rlm := r.rlm
+	kourt.Rollback(cross(rlm))
+}
+
+// KourtFreeze executes a freeze proposal on the mirror realm.
+func (r *StateRef) KourtFreeze() {
+	r.check()
+	rlm := r.rlm
+	kourt.Freeze(cross(rlm))
+}
+
+// KourtTransferAuthority executes an authority-transfer proposal on the
+// mirror realm.
+func (r *StateRef) KourtTransferAuthority(csvPaths string) {
+	r.check()
+	rlm := r.rlm
+	kourt.TransferAuthorityToRealms(cross(rlm), csvPaths)
+}
+
+// KourtAbandon closes a mirror record the current release cannot advance.
+func (r *StateRef) KourtAbandon(disputeID uint64, reason string) {
+	r.check()
+	rlm := r.rlm
+	kourt.Abandon(cross(rlm), disputeID, reason)
+}
+
 // ---- own-realm parameters and releases
 
 // SetOwnParam changes one of this realm's parameters (a passed proposal).
 func (r *StateRef) SetOwnParam(name string, value int64) {
 	r.check()
-	old, err := registry.Set(name, value)
+	old, err := registry.SetAt(name, value, runtime.ChainHeight())
 	if err != nil {
 		panic(err.Error())
 	}

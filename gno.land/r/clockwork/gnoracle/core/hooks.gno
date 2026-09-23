@@ -69,15 +69,19 @@ func (r *StateRef) OpenAppeal(disputeID uint64) uint64 {
 // The amount must already have been taken out of a holdings category.
 func (r *StateRef) FundVoters(disputeID uint64, amount int64) {
 	r.check()
-	if amount <= 0 {
-		return
-	}
-	if amount > Balance() {
-		panic("core: insufficient realm balance")
+	if amount < 0 {
+		panic("core: amount must not be negative")
 	}
 	rlm := r.rlm
-	b := banker.NewBanker(banker.BankerTypeRealmSend, rlm)
-	b.SendCoins(rlm.Address(), chain.PackageAddress(DAOPath), chain.NewCoins(chain.NewCoin(StakeDenom, amount)))
+	if amount > 0 {
+		if amount > Balance() {
+			panic("core: insufficient realm balance")
+		}
+		b := banker.NewBanker(banker.BankerTypeRealmSend, rlm)
+		b.SendCoins(rlm.Address(), chain.PackageAddress(DAOPath), chain.NewCoins(chain.NewCoin(StakeDenom, amount)))
+	}
+	// a zero amount still tells the DAO the outcome is applied (its ballot
+	// becomes final and settlement may run)
 	mustHouse().FundVoters(cross(rlm), disputeID, amount)
 	emit("VotersFunded", "dispute", strconv.FormatUint(disputeID, 10), "amount", strconv.FormatInt(amount, 10))
 }

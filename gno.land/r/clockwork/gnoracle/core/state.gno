@@ -64,6 +64,7 @@ type Feed struct {
 	Deposit   int64 // proposal deposit held until activation or rejection
 
 	// funding
+	Prepaid      int64 // the requester's first period or bounty, escrowed until activation
 	Pool         int64 // long-lived funds: subscriptions, bounty
 	Drip         int64 // paid from Pool per round (0 for one-off: the whole pool)
 	FeeAccrued   int64 // metered fees (provider share) since the last finalisation
@@ -83,6 +84,14 @@ type Feed struct {
 	LastRound     uint64
 	LastRoundAt   int64 // open time of the round that produced LastValue
 	LastFinalAt   int64 // block time LastValue's round was finalised
+	// the last final value: the newest aggregated round whose dispute window
+	// passed without a dispute standing against it. Served while the latest
+	// round is disputed or voided, and the quarantine reference (plan §4.3, §7.1).
+	HaveFinal     bool
+	FinalValue    int64
+	FinalRound    uint64
+	FinalAt       int64
+	FinalCursor   uint64 // next round to examine for promotion
 	OldestRound   uint64
 	EmptyStreak   int64
 	Reopened      bool
@@ -422,6 +431,20 @@ func assertStateAccess(_ int, rlm realm) {
 
 func (r *StateRef) check() { assertStateAccess(0, r.rlm) }
 
+// inflow is asserted by every setter that books coins as received: the
+// realm's actual balance must cover everything it already owes plus the new
+// amount, so an implementation cannot book coins that did not arrive with
+// the call (the -send of a user transaction is on the account before the
+// call runs).
+func (r *StateRef) inflow(amount int64) {
+	if amount <= 0 {
+		panic("core: amount must be positive")
+	}
+	if HeldTotal()+amount > Balance() {
+		panic("core: the coins for this operation were not received")
+	}
+}
+
 // Emit lets the live implementation emit an event under this realm's path.
 func (r *StateRef) Emit(typ string, attrs ...string) {
 	r.check()
@@ -436,7 +459,12 @@ func (r *StateRef) NewFeed(proposer address, fromRealm bool, sp *spec.Spec, depo
 	id := uint64(feedSeq.Next())
 	f := &Feed{ID: id, Proposer: proposer, FromRealm: fromRealm, Spec: sp, Status: FeedProposed, CreatedAt: Now(), Deposit: deposit, DeclaredValue: declared, Slots: blankSlots}
 	feeds.Set(feedKey(id), f)
-	held.Deposits += deposit
+	if deposit > 0 {
+		r.inflow(deposit)
+		held.Deposits += deposit
+	} else if deposit < 0 {
+		panic("core: deposit must not be negative")
+	}
 	emit("FeedProposed", "feed", u(id), "proposer", string(proposer), "specHash", sp.Hash)
 	return f
 }
@@ -462,10 +490,25 @@ func (r *StateRef) FeedSetStatus(id uint64, status string) {
 // FeedActivate marks a feed active with its first round time and drip.
 func (r *StateRef) FeedActivate(id uint64, startAt, drip int64) {
 	r.check()
+	if drip < 0 {
+		panic("core: drip must not be negative")
+	}
 	f := mustFeed(id)
 	f.Status = FeedActive
 	f.StartAt = startAt
 	f.Drip = drip
+	// the escrowed prepayment becomes the pool (one-off) or takes the fee
+	// split (recurring) only now; a rejected request gets it back
+	if pre := f.Prepaid; pre > 0 {
+		f.Prepaid = 0
+		held.Deposits -= pre
+		if f.Spec != nil && !f.Spec.IsRecurring() {
+			f.Pool += pre
+			held.Pools += pre
+		} else {
+			r.splitSubscription(id, pre)
+		}
+	}
 	emit("FeedActivated", "feed", u(id), "startAt", strconv.FormatInt(startAt, 10))
 }
 
@@ -600,11 +643,74 @@ func (r *StateRef) FeedSetDisputeCounters(id uint64, open, inRow int64, lastAt i
 func (r *StateRef) FeedDelete(id uint64) {
 	r.check()
 	f := mustFeed(id)
-	if f.Pool != 0 || f.FeeAccrued != 0 || f.PenaltyCarry != 0 || f.Deposit != 0 {
+	if f.Pool != 0 || f.FeeAccrued != 0 || f.PenaltyCarry != 0 || f.Deposit != 0 || f.Prepaid != 0 {
 		panic("core: feed still holds funds")
 	}
+	// reclaim the feed's index entries: slot log, sponsorships, sponsored consumers
+	removeByPrefix(slotlog, u64key(id))
+	removeByPrefix(sponsors, u64key(id))
+	removeByPrefix(sponsored, u64key(id))
 	feeds.Remove(feedKey(id))
 	emit("FeedPruned", "feed", u(id))
+}
+
+// removeByPrefix deletes every entry whose key starts with prefix (the
+// tree must not be modified while iterating, so keys are collected first).
+func removeByPrefix(t *bptree.BPTree, prefix string) {
+	for {
+		keys := []string{}
+		t.Iterate(prefix, prefix+"\xff", func(k string, _ any) bool {
+			keys = append(keys, k)
+			return len(keys) >= 256
+		})
+		if len(keys) == 0 {
+			return
+		}
+		for _, k := range keys {
+			t.Remove(k)
+		}
+		if len(keys) < 256 {
+			return
+		}
+	}
+}
+
+// FeedPromoteFinal advances the feed's last-final cursor: rounds finalise in
+// order, so it walks from the cursor while rounds have passed their dispute
+// window with no dispute standing, at most 64 per call.
+func (r *StateRef) FeedPromoteFinal(id uint64) {
+	r.check()
+	f := mustFeed(id)
+	if f.Spec == nil || !f.HaveLast {
+		return
+	}
+	t := Now()
+	for k := 0; k < 64 && f.FinalCursor <= f.LastFinalized; k++ {
+		rid := f.FinalCursor
+		rd := GetRound(id, rid)
+		if rd == nil { // pruned or never recorded: long past
+			f.FinalCursor++
+			continue
+		}
+		if rd.Status == RoundOpen {
+			return
+		}
+		if rd.Status == RoundAggregated {
+			if rd.FinalisedAt+f.Spec.DisputeWindow > t {
+				return
+			}
+			if rd.DisputeID != 0 {
+				if d := GetDispute(rd.DisputeID); d != nil && d.Status != DisputeResolved {
+					return
+				}
+			}
+			f.HaveFinal = true
+			f.FinalValue = rd.Value
+			f.FinalRound = rid
+			f.FinalAt = rd.FinalisedAt
+		}
+		f.FinalCursor++
+	}
 }
 
 // ---- providers
@@ -621,6 +727,7 @@ func (r *StateRef) NewProvider(feed uint64, addr address, stake int64, slot int6
 	now := Now()
 	p := &Provider{Feed: feed, Addr: addr, Stake: stake, Status: ProviderActive, Slot: slot, Memo: memo, JoinedAt: now, ObligedFrom: obligedFrom, EpochStart: now, JailingsSince: now}
 	providers.Set(providerKey(feed, addr), p)
+	r.inflow(stake)
 	held.Stakes += stake
 	emit("ProviderRegistered", "feed", u(feed), "provider", string(addr), "stake", strconv.FormatInt(stake, 10))
 	return p
@@ -642,6 +749,7 @@ func (r *StateRef) ProviderAddStake(feed uint64, addr address, amount int64) {
 	}
 	p := mustProvider(feed, addr)
 	p.Stake += amount
+	r.inflow(amount)
 	held.Stakes += amount
 }
 
@@ -721,6 +829,23 @@ func (r *StateRef) ProviderPayUnbonded(feed uint64, addr address) int64 {
 		held.Unbonding -= amount
 		r.send(addr, amount)
 	}
+	emit("ProviderWithdrawn", "feed", u(feed), "provider", string(addr), "amount", strconv.FormatInt(amount, 10))
+	return amount
+}
+
+// RewardForfeit moves a provider's unclaimed rewards to the fee pool (a
+// pruned feed after its retention, plan §5.2).
+func (r *StateRef) RewardForfeit(feed uint64, addr address) int64 {
+	r.check()
+	p := mustProvider(feed, addr)
+	amount := p.Rewards
+	if amount == 0 {
+		return 0
+	}
+	p.Rewards = 0
+	held.Rewards -= amount
+	held.FeesPending += amount
+	emit("RewardsForfeited", "feed", u(feed), "provider", string(addr), "amount", strconv.FormatInt(amount, 10))
 	return amount
 }
 
@@ -805,6 +930,11 @@ func (r *StateRef) RoundSetDispute(feed, id uint64, disputeID uint64, overturned
 // RoundDelete removes a round record.
 func (r *StateRef) RoundDelete(feed, id uint64) {
 	r.check()
+	if rd := GetRound(feed, id); rd != nil && rd.DisputeID != 0 {
+		if d := GetDispute(rd.DisputeID); d != nil && d.Status != DisputeResolved {
+			panic("core: the round is under a dispute that is not resolved")
+		}
+	}
 	rounds.Remove(roundKey(feed, id))
 }
 
@@ -822,6 +952,7 @@ func (r *StateRef) CreditDeposit(addr address, amount int64) {
 		credits.Set(string(addr), c)
 	}
 	c.Balance += amount
+	r.inflow(amount)
 	held.Credits += amount
 	emit("CreditDeposited", "consumer", string(addr), "amount", strconv.FormatInt(amount, 10))
 }
@@ -836,6 +967,7 @@ func (r *StateRef) CreditWithdraw(addr address, amount int64) {
 	c.Balance -= amount
 	held.Credits -= amount
 	r.send(addr, amount)
+	emit("CreditWithdrawn", "consumer", string(addr), "amount", strconv.FormatInt(amount, 10))
 }
 
 // CreditSetFinalOnly toggles the consumer's read mode.
@@ -853,6 +985,9 @@ func (r *StateRef) CreditSetFinalOnly(addr address, on bool) {
 // feed's accrued fees, the rest to the fee pool awaiting the DAO.
 func (r *StateRef) CreditCharge(addr address, feed uint64, fee int64) {
 	r.check()
+	if fee <= 0 {
+		panic("core: fee must be positive")
+	}
 	c := GetCredit(addr)
 	if c == nil || c.Balance < fee {
 		panic("core: insufficient credit; deposit with DepositFor")
@@ -884,34 +1019,52 @@ func (r *StateRef) SponsorPay(feed uint64, sponsor address, amount int64, paidUn
 	if len(consumers) > 8 {
 		panic("core: at most 8 consumers per sponsor")
 	}
+	r.inflow(amount)
 	s := GetSponsor(feed, sponsor)
 	if s == nil {
 		s = &Sponsorship{Feed: feed, Addr: sponsor}
 		sponsors.Set(providerKey(feed, sponsor), s)
 	}
+	// a consumer keeps whichever sponsorship covers it longest
 	for _, old := range s.Consumers {
-		sponsored.Remove(providerKey(feed, old))
+		if v := sponsored.Get(providerKey(feed, old)); v != nil && v.(*Sponsorship) == s {
+			sponsored.Remove(providerKey(feed, old))
+		}
 	}
 	s.PaidUntil = paidUntil
 	s.Paid += amount
 	s.Consumers = consumers
 	for _, c := range consumers {
+		if v := sponsored.Get(providerKey(feed, c)); v != nil {
+			if other := v.(*Sponsorship); other != s && other.PaidUntil >= paidUntil {
+				continue
+			}
+		}
 		sponsored.Set(providerKey(feed, c), s)
 	}
-	r.splitFee(feed, amount)
-	// subscriptions fund the pool, not the per-round accrual
-	f := mustFeed(feed)
-	f.Pool += f.FeeAccrued
-	f.FeeAccrued = 0
+	// subscriptions fund the long-lived pool; metered read fees stay in the
+	// per-round accrual
+	r.splitSubscription(feed, amount)
 	emit("Sponsored", "feed", u(feed), "sponsor", string(sponsor), "amount", strconv.FormatInt(amount, 10), "paidUntil", strconv.FormatInt(paidUntil, 10))
 }
 
-// splitFee routes a payment: the provider share to the feed's accrued fees,
-// the staker and treasury shares to the pending fee pool.
+// splitFee routes a read fee: the provider share to the feed's accrued fees
+// (paid with the next round), the staker and treasury shares to the pending
+// fee pool.
 func (r *StateRef) splitFee(feed uint64, amount int64) {
 	f := mustFeed(feed)
 	providerShare := amount * Param("feeSplitProvidersBps") / 10_000
 	f.FeeAccrued += providerShare
+	held.Pools += providerShare
+	held.FeesPending += amount - providerShare
+}
+
+// splitSubscription routes a subscription or prepaid period: the provider
+// share to the feed's long-lived pool, the rest to the pending fee pool.
+func (r *StateRef) splitSubscription(feed uint64, amount int64) {
+	f := mustFeed(feed)
+	providerShare := amount * Param("feeSplitProvidersBps") / 10_000
+	f.Pool += providerShare
 	held.Pools += providerShare
 	held.FeesPending += amount - providerShare
 }
@@ -924,23 +1077,50 @@ func (r *StateRef) BountyIn(feed uint64, amount int64) {
 	if amount <= 0 {
 		panic("core: amount must be positive")
 	}
+	r.inflow(amount)
 	f := mustFeed(feed)
 	f.Pool += amount
 	held.Pools += amount
 }
 
-// DepositRefund returns a feed's proposal deposit to the proposer.
+// DepositRefund returns a rejected request's deposit and escrowed
+// prepayment to the proposer (as credit when the proposer is a realm).
 func (r *StateRef) DepositRefund(feed uint64) {
 	r.check()
 	f := mustFeed(feed)
-	amount := f.Deposit
+	amount := f.Deposit + f.Prepaid
 	if amount == 0 {
 		return
 	}
+	f.Deposit, f.Prepaid = 0, 0
+	held.Deposits -= amount
+	r.payProposer(f, amount)
+	emit("DepositRefunded", "feed", u(feed), "amount", strconv.FormatInt(amount, 10))
+}
+
+// DepositToFees forfeits a feed's proposal deposit to the fee pool (spam);
+// the escrowed prepayment still goes back to the proposer.
+func (r *StateRef) DepositToFees(feed uint64) {
+	r.check()
+	f := mustFeed(feed)
+	amount := f.Deposit
 	f.Deposit = 0
 	held.Deposits -= amount
+	held.FeesPending += amount
+	if pre := f.Prepaid; pre > 0 {
+		f.Prepaid = 0
+		held.Deposits -= pre
+		r.payProposer(f, pre)
+	}
+}
+
+// payProposer sends coins to the proposer, or credits a realm proposer.
+func (r *StateRef) payProposer(f *Feed, amount int64) {
+	if amount <= 0 {
+		return
+	}
 	if f.FromRealm {
-		// a realm cannot spend loose coins; give the deposit back as credit
+		// a realm cannot spend loose coins; give the money back as credit
 		c := GetCredit(f.Proposer)
 		if c == nil {
 			c = &Credit{Addr: f.Proposer}
@@ -953,21 +1133,32 @@ func (r *StateRef) DepositRefund(feed uint64) {
 	r.send(f.Proposer, amount)
 }
 
-// DepositToFees forfeits a feed's proposal deposit to the fee pool (spam).
-func (r *StateRef) DepositToFees(feed uint64) {
+// FeedPoolRefund returns a one-off feed's undistributed bounty (pool and
+// carry) to the proposer when the feed is retired; read fees stay for the
+// fee pool.
+func (r *StateRef) FeedPoolRefund(feed uint64) int64 {
 	r.check()
 	f := mustFeed(feed)
-	amount := f.Deposit
-	f.Deposit = 0
-	held.Deposits -= amount
-	held.FeesPending += amount
+	amount := f.Pool + f.PenaltyCarry
+	f.Pool, f.PenaltyCarry = 0, 0
+	held.Pools -= amount
+	r.payProposer(f, amount)
+	if f.FeeAccrued > 0 {
+		fees := f.FeeAccrued
+		f.FeeAccrued = 0
+		held.Pools -= fees
+		held.FeesPending += fees
+	}
+	return amount
 }
 
 // CreditSpendOnFeed pays a feed proposal from a realm's credit: the deposit
-// is held, the funding goes to the pool (one-off) or through the fee split
-// (recurring).
-func (r *StateRef) CreditSpendOnFeed(addr address, feed uint64, deposit, funding int64, oneOff bool) {
+// and the prepaid period or bounty are escrowed until activation.
+func (r *StateRef) CreditSpendOnFeed(addr address, feed uint64, deposit, funding int64) {
 	r.check()
+	if deposit < 0 || funding < 0 {
+		panic("core: amounts must not be negative")
+	}
 	c := GetCredit(addr)
 	total := deposit + funding
 	if c == nil || total <= 0 || c.Balance < total {
@@ -978,17 +1169,8 @@ func (r *StateRef) CreditSpendOnFeed(addr address, feed uint64, deposit, funding
 	held.Credits -= total
 	f := mustFeed(feed)
 	f.Deposit += deposit
-	held.Deposits += deposit
-	if funding > 0 {
-		if oneOff {
-			f.Pool += funding
-			held.Pools += funding
-		} else {
-			r.splitFee(feed, funding)
-			f.Pool += f.FeeAccrued
-			f.FeeAccrued = 0
-		}
-	}
+	f.Prepaid += funding
+	held.Deposits += total
 }
 
 // FeedPoolToFees moves a deprecated feed's remaining funds to the fee pool.
@@ -1063,6 +1245,7 @@ func (r *StateRef) RewardPay(feed uint64, addr address) int64 {
 	p.Rewards = 0
 	held.Rewards -= amount
 	r.send(addr, amount)
+	emit("RewardsClaimed", "feed", u(feed), "provider", string(addr), "amount", strconv.FormatInt(amount, 10))
 	return amount
 }
 
@@ -1074,16 +1257,25 @@ func (r *StateRef) MissSlash(feed uint64, addr address, amount int64, alerter ad
 		return
 	}
 	p := mustProvider(feed, addr)
-	if amount > p.Stake {
-		amount = p.Stake
+	// unbonding stake stays slashable (plan §5.1)
+	if amount > p.Stake+p.UnbondAmount {
+		amount = p.Stake + p.UnbondAmount
 	}
 	if amount == 0 {
 		return
 	}
-	p.Stake -= amount
+	fromStake := amount
+	if fromStake > p.Stake {
+		fromStake = p.Stake
+	}
+	p.Stake -= fromStake
+	held.Stakes -= fromStake
+	if rest := amount - fromStake; rest > 0 {
+		p.UnbondAmount -= rest
+		held.Unbonding -= rest
+	}
 	p.TotalSlashed += amount
 	p.MissSlashedEpoch += amount
-	held.Stakes -= amount
 	alert := amount * Param("alerterShareBps") / 10_000
 	carry := amount - alert
 	f := mustFeed(feed)
@@ -1108,6 +1300,7 @@ func (r *StateRef) NewDispute(feed, round uint64, disputer address, bond, propos
 		TierAsked: tier, Evidence: evidence, EvidenceHash: evidenceHash, OpenedAt: Now(), Status: DisputeOpen, BallotRound: 1,
 		PriorValue: priorValue, PriorTier: priorTier}
 	disputes.Set(u64key(id), d)
+	r.inflow(bond)
 	held.Bonds += bond
 	emit("DisputeOpened", "dispute", u(id), "feed", u(feed), "round", u(round), "disputer", string(disputer),
 		"bond", strconv.FormatInt(bond, 10), "proposedValue", strconv.FormatInt(proposedValue, 10), "tier", tier)
@@ -1139,6 +1332,7 @@ func (r *StateRef) DisputeSetDecided(id uint64, outcome, tier string, coherent i
 func (r *StateRef) DisputeSetAppealed(id uint64, appellant address, bond int64) {
 	r.check()
 	d := mustDispute(id)
+	r.inflow(bond)
 	d.Status = DisputeAppealed
 	d.Appellant = appellant
 	d.AppealBond = bond
@@ -1183,6 +1377,7 @@ func (r *StateRef) BondRelease(id uint64, to address, amount int64) {
 	}
 	held.Bonds -= amount
 	r.send(to, amount)
+	emit("BondReleased", "dispute", u(id), "to", string(to), "amount", strconv.FormatInt(amount, 10))
 }
 
 // BondToPool credits part of a held bond to a feed's provider pool.
@@ -1262,6 +1457,9 @@ func (r *StateRef) SlashProvider(feed uint64, addr address, bps int64, tier stri
 	p.TotalSlashed += taken
 	held.Bonds += taken
 	if tier == "minor" {
+		if Now()-p.EpochStart >= Param("providerEpoch") {
+			p.MinorsEpoch, p.MissSlashedEpoch, p.EpochStart = 0, 0, Now()
+		}
 		p.MinorsEpoch++
 	}
 	emit("ProviderSlashed", "feed", u(feed), "provider", string(addr), "amount", strconv.FormatInt(taken, 10), "reason", "dispute-"+tier)
@@ -1301,6 +1499,9 @@ func (r *StateRef) RoundOverturn(feed, id uint64, value int64) {
 	rd.Tier = "final"
 	rd.Overturned = true
 	f := mustFeed(feed)
+	if f.HaveFinal && f.FinalRound == id {
+		f.FinalValue = value
+	}
 	if f.HaveValue && f.LastRound == id {
 		f.LastValue = value
 		f.LastTier = "final"

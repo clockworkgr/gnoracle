@@ -182,6 +182,7 @@ type TierInput struct {
 	LastFinal     int64 // the last final value, if HaveLast
 	HaveLast      bool
 	QuarantineBps int64 // largest move from LastFinal that still counts as consensus
+	Categorical   bool  // option feeds: indices are labels, the move test does not apply
 }
 
 // DecideTier applies the consensus rule of the plan (§4.3): at least
@@ -198,7 +199,7 @@ func DecideTier(in TierInput) Tier {
 	if 3*in.Eligible < 2*in.Active {
 		return TierProvisional
 	}
-	if in.HaveLast && !WithinTolerance(in.Value, in.LastFinal, in.QuarantineBps) {
+	if !in.Categorical && in.HaveLast && !WithinTolerance(in.Value, in.LastFinal, in.QuarantineBps) {
 		return TierProvisional
 	}
 	return TierConsensus

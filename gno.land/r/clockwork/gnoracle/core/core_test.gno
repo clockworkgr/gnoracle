@@ -79,9 +79,11 @@ func install(cur realm) {
 	nosend()
 	for _, v := range []int64{5_000 * gnot, 2_500 * gnot, 1_250 * gnot, 1_000 * gnot} {
 		core.SetParam(cross(cur), "providerMinStakeFloor", v)
+		testing.SkipHeights(1) // parameters change at most once per height
 	}
 	for _, v := range []int64{32, 16, 8} {
 		core.SetParam(cross(cur), "minRoundsKept", v)
+		testing.SkipHeights(1) // parameters change at most once per height
 	}
 }
 
@@ -113,7 +115,8 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	f := core.GetFeed(id)
 	uassert.Equal(t, core.FeedProposed, f.Status)
 	uassert.Equal(t, int64(5*gnot), f.Deposit)
-	uassert.Equal(t, int64(70*gnot), f.Pool) // 70% of the subscription
+	uassert.Equal(t, int64(100*gnot), f.Prepaid) // the first period waits in escrow until activation
+	uassert.Equal(t, int64(0), f.Pool)
 	health(t)
 
 	// under-funded proposals are refused
@@ -131,6 +134,8 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	f = core.GetFeed(id)
 	uassert.Equal(t, core.FeedActive, f.Status)
 	uassert.Equal(t, int64(0), f.Deposit) // refunded on activation
+	uassert.Equal(t, int64(0), f.Prepaid)
+	uassert.Equal(t, int64(70*gnot), f.Pool) // 70% of the prepaid period, split at activation
 	uassert.True(t, f.StartAt > core.Now())
 	uassert.Equal(t, int64(0), f.StartAt%3600)
 	// drip: 70 GNOT over 720 hourly rounds
@@ -163,10 +168,11 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.AbortsContains(t, cur, "has not opened", func() { core.Submit(cross(cur), id, 0, 1_000_000) })
 	skip(f.StartAt - core.Now() + 1)
 
-	// a consumer needs credit
+	// nothing is served yet, so nothing is charged, credit or not
 	testing.SetRealm(testing.NewUserRealm(consumer))
 	nosend()
-	uassert.AbortsContains(t, cur, "insufficient credit", func() { core.Read(cross(cur), id) })
+	_, _, _, _, tier0 := core.Read(cross(cur), id)
+	uassert.Equal(t, "none", tier0)
 	testing.SetRealm(testing.NewUserRealm(consumer))
 	pay(1 * gnot)
 	core.DepositFor(cross(cur), consumer)
@@ -177,7 +183,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, int64(6), dec)
 	uassert.Equal(t, int64(0), v)
 	uassert.Equal(t, uint64(0), rid)
-	uassert.Equal(t, int64(1*gnot-20_000), core.GetCredit(consumer).Balance)
+	uassert.Equal(t, int64(1*gnot), core.GetCredit(consumer).Balance)
 
 	// submissions: alice and bob agree, carol is 5% off (outside 1% tolerance)
 	testing.SetRealm(testing.NewUserRealm(alice))
@@ -209,7 +215,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, core.GetProvider(id, alice).Rewards, core.GetProvider(id, bob).Rewards)
 	health(t)
 
-	// the consumer now reads a consensus value
+	// the consumer now reads a consensus value and pays the read price
 	testing.SetRealm(testing.NewUserRealm(consumer))
 	nosend()
 	v, _, rid, at, tier := core.Read(cross(cur), id)
@@ -217,6 +223,11 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, uint64(0), rid)
 	uassert.Equal(t, f.StartAt, at)
 	uassert.Equal(t, "consensus", tier)
+	uassert.Equal(t, int64(1*gnot-20_000), core.GetCredit(consumer).Balance)
+	// a reader without credit is refused once there is something to serve
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	uassert.AbortsContains(t, cur, "insufficient credit", func() { core.Read(cross(cur), id) })
 
 	// --- round 1: only alice submits; window closes; anyone finalises
 	skip(3600)
@@ -244,7 +255,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, uint64(0), rid)
 	uassert.Equal(t, "consensus", tier)
 
-	// --- round 2: all three submit close together; the median moves 20% -> provisional
+	// --- round 2: all three submit close together; the median moves 20%
 	skip(3600 - 600)
 	testing.SetRealm(testing.NewUserRealm(alice))
 	nosend()
@@ -256,7 +267,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	nosend()
 	core.Submit(cross(cur), id, 2, 1_199_000)
 	rd = core.GetRound(id, 2)
-	uassert.Equal(t, "provisional", rd.Tier)
+	uassert.Equal(t, "consensus", rd.Tier) // no final value exists yet (round 0's window is 12 h), so there is no quarantine reference
 	uassert.Equal(t, int64(1_200_000), rd.Value)
 	uassert.Equal(t, int64(0), core.GetProvider(id, bob).ConsecutiveMisses) // reset on submit
 	health(t)
@@ -455,6 +466,7 @@ func TestGates(cur realm, t *testing.T) {
 	testing.SetRealm(testing.NewUserRealm(admin))
 	nosend()
 	core.SetParam(cross(cur), "missSlashBps", 75)
+	testing.SkipHeights(1) // parameters change at most once per height
 	uassert.Equal(t, int64(75), core.Param("missSlashBps"))
 	testing.SetRealm(testing.NewUserRealm(stranger))
 	nosend()

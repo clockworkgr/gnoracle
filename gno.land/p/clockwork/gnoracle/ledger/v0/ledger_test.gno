@@ -136,3 +136,24 @@ func TestSlashTakesStakeThenUnbondingOldestFirst(t *testing.T) {
 	uassert.Equal(t, int64(70), taken)
 	uassert.Equal(t, int64(0), u.Total())
 }
+
+func TestAccumulatorCapCarriesInsteadOfWedging(t *testing.T) {
+	var a ledger.Accumulator
+	var tiny, whale ledger.Position
+	a.Deposit(&tiny, 1)
+	a.Bump(9_000_000) // 9 GNOT on one share: uncapped, accPerShare would be 9e18
+	owedTiny := a.Owed(&tiny)
+	if owedTiny >= 9_000_000 {
+		t.Fatalf("the cap must hold part of the bump in carry, tiny owed %d", owedTiny)
+	}
+	// a large position joins and settles without overflow
+	a.Deposit(&whale, 2_000_000_000_000)
+	a.Bump(1_000)
+	sum := a.Owed(&tiny) + a.Owed(&whale)
+	if sum < 0 || sum > 9_001_000 {
+		t.Fatalf("owed %d beyond what was bumped", sum)
+	}
+	if a.Owed(&whale) <= 0 {
+		t.Fatal("the carried remainder must reach the new shares")
+	}
+}

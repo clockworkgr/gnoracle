@@ -26,6 +26,11 @@ func (*implV1) Register(_ int, rlm realm, provider address, feedID uint64, memo 
 	if f.ActiveCount >= int64(f.Spec.MaxProviders) {
 		panic("gnoracle: the feed's provider set is full")
 	}
+	if !f.Spec.IsRecurring() {
+		if _, started := schedule(f).Current(now()); started {
+			panic("gnoracle: the one-off round is in progress; nothing is left to serve")
+		}
+	}
 	slot := freeSlot(f)
 	from := obligedFrom(f)
 	st.NewProvider(feedID, provider, sent, int64(slot), memo, from)
@@ -42,7 +47,10 @@ func freeSlot(f *core.Feed) int {
 }
 
 // obligedFrom is the first round a provider seated now owes: the round after
-// the current one, or round 0 before the feed starts.
+// the current one, or round 0 before the feed starts. A one-off feed whose
+// round has opened returns 1, a round that never exists: slot changes after
+// the opening then never rewrite round 0's holders of record, and a late
+// joiner cannot submit to the round in progress.
 func obligedFrom(f *core.Feed) uint64 {
 	sched := schedule(f)
 	cur, ok := sched.Current(now())
@@ -50,9 +58,18 @@ func obligedFrom(f *core.Feed) uint64 {
 		return 0
 	}
 	if sched.IsOneOff() {
-		return 0
+		return 1
 	}
 	return cur + 1
+}
+
+// leave takes a provider out of the active set (its slot is cleared from
+// the next round on) and starts its unbond period.
+func leave(st *core.StateRef, f *core.Feed, p *core.Provider) {
+	if p.Status == core.ProviderActive {
+		st.FeedClearSlot(f.ID, p.Slot, obligedFrom(f))
+	}
+	st.ProviderStartUnbond(f.ID, p.Addr, now()+param("unbondPeriod"))
 }
 
 // TopUp adds stake.
@@ -76,10 +93,7 @@ func (*implV1) RequestUnbond(_ int, rlm realm, provider address, feedID uint64) 
 	if p == nil || (p.Status != core.ProviderActive && p.Status != core.ProviderJailed) {
 		panic("gnoracle: not an active or jailed provider of this feed")
 	}
-	if p.Status == core.ProviderActive {
-		st.FeedClearSlot(feedID, p.Slot, obligedFrom(f))
-	}
-	st.ProviderStartUnbond(feedID, provider, now()+param("unbondPeriod"))
+	leave(st, f, p)
 }
 
 // Withdraw pays out after the unbond period, plus any rewards.
@@ -143,9 +157,6 @@ func (*implV1) ForceUnbond(_ int, rlm realm, feedID uint64, provider address) {
 	if p == nil || (p.Status != core.ProviderActive && p.Status != core.ProviderJailed) {
 		panic("gnoracle: not an active or jailed provider of this feed")
 	}
-	if p.Status == core.ProviderActive {
-		st.FeedClearSlot(feedID, p.Slot, obligedFrom(f))
-	}
-	st.ProviderStartUnbond(feedID, provider, now()+param("unbondPeriod"))
+	leave(st, f, p)
 	st.Emit("ProviderEjected", "feed", u(feedID), "provider", string(provider))
 }

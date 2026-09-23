@@ -15,6 +15,7 @@
 package core
 
 import (
+	"chain/runtime"
 	"chain/runtime/unsafe"
 	"strconv"
 	"strings"
@@ -78,7 +79,7 @@ type Core interface {
 	SetFinalOnly(_ int, rlm realm, consumer address, on bool)
 	Read(_ int, rlm realm, consumer address, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string)
 	ReadRound(_ int, rlm realm, consumer address, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
-	// disputes (served from a later release; v1 refuses them)
+	// disputes (plan §7)
 	Dispute(_ int, rlm realm, disputer address, feedID, roundID uint64, proposedValue int64, tier, evidence string, sent int64) uint64
 	Appeal(_ int, rlm realm, appellant address, disputeID uint64, sent int64)
 	ResolveDispute(_ int, rlm realm, caller address, disputeID uint64)
@@ -290,7 +291,7 @@ func ResolveDispute(cur realm, disputeID uint64) {
 // Authority only.
 func SetParam(cur realm, name string, value int64) {
 	proxy.AssertAuthorized(0, cur)
-	old, err := registry.Set(name, value)
+	old, err := registry.SetAt(name, value, runtime.ChainHeight())
 	if err != nil {
 		panic(err.Error())
 	}
@@ -329,7 +330,14 @@ func Rollback(cur realm) {
 func Forget(cur realm) { proxy.Forget(0, cur) }
 
 // Freeze ends upgradeability for good. Authority only.
+// Freezing also fixes the authority for good, and the same authority governs
+// parameters, activations and ejections, so it refuses while a key still
+// holds it: hand over to the DAO first.
 func Freeze(cur realm) {
+	proxy.AssertAuthorized(0, cur)
+	if !strings.HasPrefix(proxy.Authority().String(), "realms:") {
+		panic("core: hand the authority to the DAO realm before freezing")
+	}
 	proxy.Freeze(0, cur)
 	emit("Frozen")
 }
@@ -357,8 +365,23 @@ func TransferAuthorityToRealms(cur realm, csvPaths string) {
 			paths = append(paths, p)
 		}
 	}
+	// a realm-only authority must include the DAO: a typo here would leave
+	// no principal able to govern the realm ever again
+	proxy.AssertAuthorized(0, cur)
+	if !containsPath(paths, DAOPath) {
+		panic("core: the realm authority must include " + DAOPath)
+	}
 	proxy.TransferAuthority(0, cur, upgradeable.NewRealmAuthority(paths...))
 	emit("AuthorityTransferred", "authority", strings.Join(paths, ","))
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, p := range paths {
+		if p == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TransferAuthorityShared keeps an address and adds governance realms, for the
@@ -371,6 +394,10 @@ func TransferAuthorityShared(cur realm, owner address, csvPaths string) {
 		if p != "" {
 			paths = append(paths, p)
 		}
+	}
+	proxy.AssertAuthorized(0, cur)
+	if !containsPath(paths, DAOPath) {
+		panic("core: the shared authority must include " + DAOPath)
 	}
 	proxy.TransferAuthority(0, cur, upgradeable.NewAnyOf(upgradeable.NewAddrAuthority(owner), upgradeable.NewRealmAuthority(paths...)))
 	emit("AuthorityTransferred", "authority", string(owner)+"|"+strings.Join(paths, ","))

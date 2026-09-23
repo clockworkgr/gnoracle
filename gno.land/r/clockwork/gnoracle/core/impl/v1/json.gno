@@ -232,6 +232,12 @@ func jsonRound(f *core.Feed, rid uint64) *jsonw.Object {
 	if sched.IsOneOff() && rid != 0 {
 		return jsonNow().Uint("feed", f.ID).Uint("id", rid).Str("status", "none").Bool("exists", false)
 	}
+	if !sched.IsOneOff() {
+		cur, ok := sched.Current(now())
+		if !ok && rid > 0 || ok && rid > cur+1 {
+			return jsonNow().Uint("feed", f.ID).Uint("id", rid).Str("status", "none").Bool("exists", false).Bool("scheduled", false)
+		}
+	}
 	rd := core.GetRound(f.ID, rid)
 	if rd == nil {
 		t := now()
@@ -251,7 +257,7 @@ func jsonRoundRecord(f *core.Feed, rd *core.Round) *jsonw.Object {
 	submitted := jsonw.NewArray()
 	for i := 0; i < agg.MaxSlots; i++ {
 		if rd.SubmittedMask&(1<<uint(i)) != 0 {
-			submitted.Raw(jsonw.New().Int("slot", int64(i)).Str("addr", string(f.SlotAt(i))).String())
+			submitted.Raw(jsonw.New().Int("slot", int64(i)).Str("addr", string(core.SlotHolderAt(f.ID, int64(i), rd.ID))).String())
 		}
 	}
 	o.Raw("submitted", submitted.String())
@@ -260,7 +266,7 @@ func jsonRoundRecord(f *core.Feed, rd *core.Round) *jsonw.Object {
 		vals := jsonw.NewArray()
 		for i := 0; i < agg.MaxSlots; i++ {
 			if rd.SubmittedMask&(1<<uint(i)) != 0 {
-				vals.Raw(jsonw.New().Int("slot", int64(i)).Str("addr", string(f.SlotAt(i))).Int("value", rd.ValueAt(i)).
+				vals.Raw(jsonw.New().Int("slot", int64(i)).Str("addr", string(core.SlotHolderAt(f.ID, int64(i), rd.ID))).Int("value", rd.ValueAt(i)).
 					Bool("eligible", rd.EligibleMask&(1<<uint(i)) != 0).String())
 			}
 		}
@@ -298,7 +304,7 @@ func jsonDispute(d *core.DisputeRecord) *jsonw.Object {
 
 func renderDisputes() string {
 	total := core.DisputeCount()
-	out := "# Disputes\n\n" + u(total) + " so far. Ballots run on the [DAO](" + webPath(core.ParamStr("daoRealm")) + "); verdicts are mirrored to [Kourt](" + webPath(core.ParamStr("kourtRealm")) + ").\n\n| id | feed | round | status | outcome | opened |\n|---|---|---|---|---|---|\n"
+	out := "# Disputes\n\n" + u(total) + " so far. Ballots run on the [DAO](" + webPath(core.DAOPath) + "); verdicts are mirrored to [Kourt](" + webPath(core.ParamStr("kourtRealm")) + ").\n\n| id | feed | round | status | outcome | opened |\n|---|---|---|---|---|---|\n"
 	shown := 0
 	for id := total; id >= 1 && shown < 50; id-- {
 		d := core.GetDispute(id)
@@ -338,7 +344,7 @@ func renderDispute(id uint64) string {
 		out += "| resolved | " + i(d.ResolvedAt) + " |\n| slashed | " + i(d.Slashed) + " ugnot |\n"
 	}
 	out += "| evidence hash | `" + d.EvidenceHash + "` |\n\n"
-	out += "Ballot: [DAO dispute " + u(id) + "](" + webPath(core.ParamStr("daoRealm")) + ":ballot/dispute/" + u(id) + ") · Court of record: [Kourt mirror](" + webPath(core.ParamStr("kourtRealm")) + ":dispute/" + u(id) + ")\n\n"
+	out += "Ballot: [DAO dispute " + u(id) + "](" + webPath(core.DAOPath) + ":ballot/dispute/" + u(id) + ") · Court of record: [Kourt mirror](" + webPath(core.ParamStr("kourtRealm")) + ":dispute/" + u(id) + ")\n\n"
 	out += "## Evidence\n\n" + esc(d.Evidence) + "\n"
 	return out
 }

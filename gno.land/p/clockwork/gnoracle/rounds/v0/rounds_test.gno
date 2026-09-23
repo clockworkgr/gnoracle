@@ -112,3 +112,17 @@ func TestStale(t *testing.T) {
 	uassert.False(t, rounds.Stale(start, start+2*hour, 2*hour))
 	uassert.True(t, rounds.Stale(start, start+2*hour+1, 2*hour))
 }
+
+func TestExistsRejectsUnrepresentableRounds(t *testing.T) {
+	s := rounds.Recurring(1_700_000_000, 60, 60)
+	if s.Exists(1<<62, 1_700_000_000) || s.Exists(9223372036854775807, 1_700_000_000) {
+		t.Fatal("rounds beyond int64 time must not exist")
+	}
+	if !s.Exists(1, 1_700_000_060) {
+		t.Fatal("round 1 exists at its open time")
+	}
+	o := rounds.OneOff(5000, 600)
+	if o.Exists(1, 9999) || !o.Exists(0, 5000) {
+		t.Fatal("one-off has round 0 only")
+	}
+}

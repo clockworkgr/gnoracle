@@ -74,7 +74,10 @@ func (*implV1) Crank(_ int, rlm realm, disputeID uint64) string {
 	}
 	rec := kourt.GetRecord(disputeID)
 	if rec == nil {
-		rec = st.NewRecord(disputeID, title(d))
+		rec = st.NewRecord(disputeID, binding, title(d))
+	}
+	if rec.Binding != binding {
+		panic("kourt: record " + u(disputeID) + " was filed under " + rec.Binding + "; this release binds " + binding + " (the authority may Abandon it)")
 	}
 	t := now()
 	switch rec.State {
@@ -85,6 +88,12 @@ func (*implV1) Crank(_ int, rlm realm, disputeID uint64) string {
 		kv.Stake(cross(rlm), kourt.CourtSlug, rec.ClaimID, sideYES, stakeCC)
 		st.Set(disputeID, kourt.StateStaked, 0, t, 0, "", stakeCC)
 	case kourt.StateStaked:
+		// anyone may answer once the claim is answerable; a foreign answer
+		// is recorded rather than fought, and finish judges the verdict
+		if kv.HasAnswer(kourt.CourtSlug, rec.ClaimID) {
+			st.Set(disputeID, kourt.StateAnswered, 0, t, 0, "", 0)
+			return kourt.StateAnswered
+		}
 		if t < rec.OpenedAt+answerWindow {
 			return rec.State
 		}
@@ -120,13 +129,14 @@ func finish(st *kourt.StateRef, rlm realm, rec *kourt.Record, t int64) string {
 	verdict := kv.Verdict(kourt.CourtSlug, rec.ClaimID)
 	route := kv.VerdictRoute(kourt.CourtSlug, rec.ClaimID)
 	kv.WithdrawStake(cross(rlm), kourt.CourtSlug, rec.ClaimID, sideYES)
+	// the DAO's position is YES; whoever answered and however it settled,
+	// a verdict against it is dissent
 	state := kourt.StateSettled
-	if route == "vote" {
-		if verdict == sideYES {
-			state = kourt.StateConfirmed
-		} else {
-			state = kourt.StateDissent
-		}
+	switch {
+	case verdict != sideYES:
+		state = kourt.StateDissent
+	case route == "vote":
+		state = kourt.StateConfirmed
 	}
 	st.Set(rec.Dispute, state, 0, t, verdict, route, 0)
 	return state
@@ -207,6 +217,10 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 
 const kourtPath = "gno.land/r/clockwork/gnoracle/kourtdev"
 
+// binding names the Kourt realm and court this release files into; records
+// remember it so a rebinding release never cranks another court's claims.
+const binding = kourtPath + "#" + kourt.CourtSlug
+
 // renderJSON serves `:json/now`, `:json/record/<dispute>` and
 // `:json/records[/<from>[/<count>]]` for the bot's Kourt cranking.
 func renderJSON(parts []string) string {
@@ -256,7 +270,7 @@ func renderJSON(parts []string) string {
 }
 
 func jsonRecord(rec *kourt.Record) *jsonw.Object {
-	return jsonw.New().Int("now", now()).Uint("dispute", rec.Dispute).Bool("exists", true).Str("state", rec.State).Uint("claim", rec.ClaimID).
+	return jsonw.New().Int("now", now()).Uint("dispute", rec.Dispute).Bool("exists", true).Str("binding", rec.Binding).Str("state", rec.State).Uint("claim", rec.ClaimID).
 		Str("title", rec.Title).Int("openedAt", rec.OpenedAt).Int("stakedAt", rec.StakedAt).Int("answeredAt", rec.AnsweredAt).
 		Int("settledAt", rec.SettledAt).Int("verdict", int64(rec.Verdict)).Str("route", rec.Route).Int("stake", rec.Stake).Int("steps", rec.Steps)
 }

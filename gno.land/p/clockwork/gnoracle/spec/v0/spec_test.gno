@@ -1,6 +1,7 @@
 package spec_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -192,4 +193,40 @@ func TestOneOffRules(t *testing.T) {
 	numeric := strings.Replace(mutate(outcomeFeed, "valueType", `"numeric"`), `"options":["Yes","No","Invalid"],`, `"decimals": 2,`, 1)
 	_, err := spec.Parse(numeric, now, limits())
 	uassert.NoError(t, err)
+}
+
+func TestAmountBoundsDuplicatesAndWindows(t *testing.T) {
+	now := int64(1_700_000_000)
+	lim := spec.Limits{ProviderMinStakeFloor: 1_000_000_000, ReadPriceFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000}
+	base := `{"name":"X","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"sources":"s","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"disputeWindow":7200,"readPrice":%s,"subscriptionPrice":100000000}`
+	_, err := spec.Parse(strings.Replace(base, "%s", "1844674407370957", 1), now, lim)
+	if err == nil || !strings.Contains(err.Error(), "readPrice must be between") {
+		t.Fatalf("huge readPrice accepted: %v", err)
+	}
+	_, err = spec.Parse(strings.Replace(base, "%s", "2000", 1), now, lim)
+	if err != nil {
+		t.Fatalf("valid spec rejected: %v", err)
+	}
+	// a duplicated top-level key is rejected even when a nested string repeats it
+	dup := `{"name":"X","sources":"the \"name\" field","name":"Y","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"disputeWindow":7200,"readPrice":2000,"subscriptionPrice":100000000,"tags":["name","name"]}`
+	_, err = spec.Parse(dup, now, lim)
+	if err == nil || !strings.Contains(err.Error(), `"name" appears twice`) {
+		t.Fatalf("duplicate key accepted: %v", err)
+	}
+	// one-off windows are bounded
+	oneOff := `{"name":"O","kind":"oneoff","valueType":"categorical","options":["A","B"],"resolveAt":` + strconv.FormatInt(now+7200, 10) + `,"submitWindow":9223372036854775807,"bounty":50000000,"sources":"s","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"disputeWindow":7200,"readPrice":2000}`
+	_, err = spec.Parse(oneOff, now, lim)
+	if err == nil || !strings.Contains(err.Error(), "submitWindow must be between 60 seconds and 30 days") {
+		t.Fatalf("huge one-off window accepted: %v", err)
+	}
+	// the realm may lower the dispute window ceiling
+	tight := spec.Limits{ProviderMinStakeFloor: 1_000_000_000, ReadPriceFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000, MaxDisputeWindow: 10800}
+	wide := strings.Replace(strings.Replace(base, "%s", "2000", 1), `"disputeWindow":7200`, `"disputeWindow":43200`, 1)
+	_, err = spec.Parse(wide, now, tight)
+	if err == nil || !strings.Contains(err.Error(), "disputeWindow must be between 2 hours and 3 hours") {
+		t.Fatalf("dispute window ceiling not applied: %v", err)
+	}
+	if _, err = spec.Parse(wide, now, lim); err != nil {
+		t.Fatalf("12 h window within the package default rejected: %v", err)
+	}
 }
