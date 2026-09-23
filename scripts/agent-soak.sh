@@ -122,7 +122,7 @@ sleep 1
 
 step "results"
 for name in "${KEYS[@]}"; do
-  printf '%-6s submitted %s round(s), finalised %s, errors %s\n' "$name" "$(grep -c '"kind":"submit"' "$OUT/$name-journal.jsonl" 2>/dev/null || echo 0)" "$(grep -c '"kind":"finalize"' "$OUT/$name-journal.jsonl" 2>/dev/null || echo 0)" "$(grep -c '"kind":"error"' "$OUT/$name-journal.jsonl" 2>/dev/null || echo 0)"
+  printf '%-6s submitted %s round(s), finalised %s, errors %s\n' "$name" "$(grep -c '"kind":"submit"' "$OUT/$name-journal.jsonl" 2>/dev/null || true)" "$(grep -c '"kind":"finalize"' "$OUT/$name-journal.jsonl" 2>/dev/null || true)" "$(grep -c '"kind":"error"' "$OUT/$name-journal.jsonl" 2>/dev/null || true)"
 done
 "${CLI[@]}" -raw rounds "$FEED" 6 > "$OUT/rounds.json"
 jq_ '[print(" round", r["id"], r["status"], r["tier"], "submitters", len(r["submitted"]), "pool", r["pool"]) for r in d["rounds"]]' < "$OUT/rounds.json"

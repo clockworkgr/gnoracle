@@ -240,8 +240,12 @@ func (c *Client) broadcast(ctx context.Context, memo string, extraGas int64, bui
 		if err != nil {
 			return nil, fmt.Errorf("simulate: %w", err)
 		}
-		used += extraGas
+		// the margin or the caller's headroom, whichever is larger: a call
+		// whose simulation already ran the expensive path needs no headroom
 		gasWanted = used + used*c.cfg.Gas.MarginBps/10_000
+		if used+extraGas > gasWanted {
+			gasWanted = used + extraGas
+		}
 		if gasWanted > c.cfg.Gas.Wanted {
 			gasWanted = c.cfg.Gas.Wanted
 		}

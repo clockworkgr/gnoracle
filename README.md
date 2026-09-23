@@ -22,6 +22,8 @@ namespace to the deployer address.
 - `docs/OPERATIONS.md`: deploying, upgrading, running the bot, monitoring,
   incidents. `docs/guides/`: providers, consumers, sponsors, requesters,
   members. `docs/SIMULATION.md`: break-even tables (`make sim`).
+  `docs/AGENT_SOAK_SHOWCASE.md`: a complete captured run of three agents
+  and the bot on gnodev, step by step.
 - `docs/RESEARCH.md`: verified facts about gno.land (September 2026), Kourt,
   and comparable court and oracle designs, with sources.
 - `docs/ORACLE_NETWORKS_RESEARCH.md`: raw research pass on Tellor, UMA, Pyth,
