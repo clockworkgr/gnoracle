@@ -282,14 +282,16 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 	afterEmpty(st, mustFeed(f.ID))
 }
 
-// afterEmpty deprecates a feed that has produced nothing for deadFeedRounds.
+// afterEmpty deprecates a recurring feed that has produced nothing for
+// deadFeedRounds, the way DeprecateFeed does: its funds go to the fees and
+// its providers are unseated and start unbonding.
 func afterEmpty(st *core.StateRef, f *core.Feed) {
 	if f.Status == core.FeedDeprecated {
 		return
 	}
 	if f.Spec.IsRecurring() && f.EmptyStreak >= param("deadFeedRounds") {
 		st.FeedPoolToFees(f.ID)
-		st.FeedSetStatus(f.ID, core.FeedDeprecated)
+		retire(st, f.ID, "dead")
 	}
 }
 
@@ -303,8 +305,8 @@ func missSlash(st *core.StateRef, f *core.Feed, p *core.Provider, alerter addres
 		st.ProviderSetEpoch(f.ID, p.Addr, epochStart, 0, 0)
 	}
 	base := p.Stake + slashed // stake at the start of the epoch, approximately
-	amount := base * param("missSlashBps") / 10_000
-	room := base*param("missSlashCapPerEpochBps")/10_000 - slashed
+	amount := core.MulBps(base, param("missSlashBps"))
+	room := core.MulBps(base, param("missSlashCapPerEpochBps")) - slashed
 	if amount > room {
 		amount = room
 	}

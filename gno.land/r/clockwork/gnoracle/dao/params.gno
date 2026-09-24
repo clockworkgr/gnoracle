@@ -2,6 +2,9 @@ package dao
 
 import (
 	"chain/runtime"
+	"errors"
+	"strconv"
+	"strings"
 
 	"gno.land/p/clockwork/gnoracle/params/v0"
 )
@@ -11,11 +14,13 @@ import (
 // points.
 var registry = params.New()
 
-// devChain is true on a development chain (chain id "dev": gnodev and the
-// test harness), where waiting a day for a ballot is not an option. It
-// relaxes only the floors of the timing parameters below, which DevSetParam
-// may then lower; the defaults, and every bound on any other chain, are what
-// the plan says.
+// devChain is true on a development chain (chain id "dev": gnodev), where
+// waiting a day for a ballot is not an option. It relaxes only the floors of
+// the timing parameters below, which DevSetParam may then lower, and fixes a
+// shorter epoch; the defaults, and every bound on any other chain, are what
+// the plan says. The test harness runs package init under chain id "dev"
+// (so tests see these dev bounds and the short epoch) but realm calls under
+// an empty one, so DevSetParam refuses in tests.
 var devChain = runtime.ChainID() == "dev"
 
 func devFloor(prod, dev int64) int64 {
@@ -33,10 +38,11 @@ func defineParams() {
 	pyth := int64(1_000_000)
 	gnot := int64(1_000_000)
 	// membership
-	def("epochBlocks", "blocks per voting-weight epoch", 720, devFloor(720, 10), 720, devFloor(0, 5000))
+	// fixed on every chain: a change would renumber epochs (Epoch() could run
+	// backwards) and break the checkpointed weights keyed by them
+	def("epochBlocks", "blocks per voting-weight epoch (fixed; 10 on a development chain)", devFloor(720, 10), devFloor(720, 10), devFloor(720, 10), 0)
 	def("unstakeCooldown", "seconds between RequestUnstake and Withdraw", 7*24*3600, 3*24*3600, 60*24*3600, 5000)
 	def("settleMaxN", "resolved disputes processed per member per settle", 20, 1, 200, 5000)
-	def("settleTipBps", "share of settled penalties paid to whoever runs SettleMember", 50, 0, 1000, 5000)
 	def("stakerFeeShareBps", "share of forwarded fees credited to stakers (rest to the treasury)", 5000, 0, 10_000, 5000)
 	// penalties (dispute ballots)
 	def("absenceSlashBps", "penalty per dispute a member did not reveal in", 50, 0, 1000, 5000)
@@ -44,7 +50,7 @@ func defineParams() {
 	def("abstainSlashBps", "penalty per dispute a member abstained in", 5, 0, 500, 5000)
 	def("maxPenaltyPerWindowBps", "largest total penalty per member per penaltyWindow", 500, 0, 10_000, 5000)
 	def("penaltyWindow", "window of the penalty cap", 30*24*3600, 7*24*3600, 365*24*3600, 5000)
-	def("maxVoterShareBps", "largest share of revealed weight one address may hold", 2000, 1250, 3300, 5000)
+	def("maxVoterShareBps", "largest share of obligated weight one address may hold", 2000, 1250, 3300, 5000)
 	def("disputeQuorumBps", "round-1 quorum of obligated weight", 3300, 500, 10_000, 5000)
 	def("decisionBps", "round-1 share of the two sides a side needs", 6000, 5001, 10_000, 5000)
 	def("disputeQuorumBps2", "round-2 quorum", 2500, 500, 10_000, 5000)
@@ -61,8 +67,6 @@ func defineParams() {
 	def("minStake", "smallest stake that makes a member", 1*pyth, 1, 1_000_000*pyth, 5000)
 	def("maxMintPerYearBps", "largest mint per 365 days as a share of supply", 200, 0, 1000, 5000)
 	def("upgradeTimelock", "timelock of upgrade-accept proposals", 7*24*3600, devFloor(24*3600, 30), 30*24*3600, 5000)
-	def("guardianHandoverMembers", "staked members at which the guardian hands authority over", 25, 1, 1000, 5000)
-	r.DefineString("kourtRealm", "package path of the Kourt adapter realm", "")
 }
 
 // Param returns an integer parameter.
@@ -70,6 +74,45 @@ func Param(name string) int64 { return registry.Int(name) }
 
 // ParamStr returns a string parameter.
 func ParamStr(name string) string { return registry.Str(name) }
+
+// CheckParam reports whether a `param` proposal could set name to value,
+// without setting anything. value is what follows "=" in the payload: an
+// integer for an integer parameter, or "str:<text>" for a text parameter.
+// Bounds and the per-change rate limit are checked against the current
+// value; the once-per-height rule is checked when the change is applied.
+func CheckParam(name, value string) error {
+	if !registry.Has(name) {
+		return errors.New("dao: unknown parameter " + strconv.Quote(name))
+	}
+	if strings.HasPrefix(value, "str:") {
+		if !isStrParam(name) {
+			return errors.New("dao: " + name + " is an integer parameter")
+		}
+		if len(value)-4 > 256 {
+			return errors.New("dao: " + name + " is at most 256 bytes")
+		}
+		return nil
+	}
+	if isStrParam(name) {
+		return errors.New("dao: " + name + " is a text parameter (use str:<text>)")
+	}
+	v, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return errors.New("dao: " + name + " needs an integer value")
+	}
+	return registry.Check(name, v)
+}
+
+// isStrParam reports whether name is a text parameter.
+func isStrParam(name string) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	registry.Str(name)
+	return true
+}
 
 // ParamsJSON renders every parameter.
 func ParamsJSON() string { return registry.JSON() }

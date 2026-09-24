@@ -50,7 +50,7 @@ Reads
   provider <feed> <addr> | providers <feed>
   dispute <id> | disputes | ballot <dispute> | member <addr> | proposal <id>
   params [core|dao] | health | kourt <dispute>
-  subscribers <feed> | subscription <feed> <realm-path>
+  subscribers <feed> [offset [count]] | subscription <feed> <realm-path>
   commitment <dispute> <round> <choice> <salt> <voter>   compute a commitment offline
 
 Provider (signs)
@@ -347,10 +347,14 @@ func (c *cli) run(cmd string, a []string) error {
 		}
 		return c.view(c.kourt, "record/"+a[0])
 	case "subscribers":
-		if err := need(a, 1, "subscribers <feed>"); err != nil {
+		if err := need(a, 1, "subscribers <feed> [offset [count]]"); err != nil {
 			return err
 		}
-		return c.view(c.core, "feed/"+a[0]+"/subscribers")
+		path := "feed/" + a[0] + "/subscribers"
+		for _, x := range a[1:] {
+			path += "/" + x
+		}
+		return c.view(c.core, path)
 	case "subscription":
 		if err := need(a, 2, "subscription <feed> <realm-path>"); err != nil {
 			return err

@@ -74,10 +74,15 @@ func main() {
 		}
 	}
 	fmt.Println()
-	fmt.Println("Reading: the 1,000 GNOT default subscription (about $62) covers an hourly")
+	fmt.Println("Reading: a 1,000 GNOT subscription (about $62) covers an hourly")
 	fmt.Println("feed with 5 providers at a 5% stake return; a 5-minute feed needs several")
 	fmt.Println("sponsors or a higher price; a one-minute feed is not viable at mainnet gas")
 	fmt.Println("prices and should be built as a Gnoswap-TWAP `qeval` read instead.")
+	fmt.Println()
+	fmt.Println("Not modelled: realm subscriptions (a reading realm pays the feed's")
+	fmt.Println("subscriberPrice per 30-day period, 70% of it to the round pool) add to the")
+	fmt.Println("providers' income beyond the feed funding above, so every subscribed realm")
+	fmt.Println("lowers the price the feed's sponsors must pay.")
 	fmt.Println()
 
 	fmt.Println("## 3. Where a subscription goes")
@@ -124,8 +129,9 @@ func main() {
 	fmt.Println()
 	fmt.Println("Bond = max(2,500 GNOT, 10% of the feed's active stake), doubling for repeat")
 	fmt.Println("disputes within 7 days (up to 16x). On UPHOLD the bond is forfeited 50% to")
-	fmt.Println("the providers, 30% to coherent voters, 20% to the treasury; on OVERTURN the")
-	fmt.Println("disputer gets the bond back plus 50% of the slash.")
+	fmt.Println("the providers, 30% to coherent voters, 20% to the fee pool (half to stakers,")
+	fmt.Println("half to the treasury); on OVERTURN the disputer gets the bond back plus")
+	fmt.Println("50% of the slash.")
 	fmt.Println()
 	header("active stake", "bond", "minor slash (5%) to disputer", "major slash (100%) to disputer")
 	for _, st := range []float64{30_000e6, 50_000e6, 250_000e6} {

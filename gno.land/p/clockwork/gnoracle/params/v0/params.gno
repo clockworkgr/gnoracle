@@ -2,8 +2,11 @@
 // rate limit, the shape the plan gives every DAO-tunable number (§8.3,
 // Appendix C): each parameter is defined once with its bounds, read by name,
 // and changed only within its bounds and by at most MaxChangeBps of its
-// current value per change. The realm decides who may call Set; this package
-// decides whether the value is acceptable.
+// current value per change. The rate limit never traps a value: Min and Max
+// are always reachable in one step, a change of one unit is always allowed,
+// and from zero (where a relative limit means nothing) any in-bounds value
+// is allowed. The realm decides who may call Set; this package decides
+// whether the value is acceptable.
 package params
 
 import (
@@ -166,17 +169,27 @@ func (r *Registry) Set(name string, value int64) (old int64, err error) {
 	return old, nil
 }
 
-// SetString changes a string parameter. It returns the old value.
-func (r *Registry) SetString(name, value string) (old string, err error) {
-	v := r.strs.Get(name)
-	if v == nil {
-		return "", errors.New("params: unknown string parameter: " + name)
+// CheckString reports whether value would be accepted for the string
+// parameter name, without setting.
+func (r *Registry) CheckString(name, value string) error {
+	if !r.strs.Has(name) {
+		return errors.New("params: unknown string parameter: " + name)
 	}
 	if len(value) > 256 {
-		return "", errors.New("params: string too long")
+		return errors.New("params: string too long")
 	}
+	return nil
+}
+
+// SetString changes a string parameter after CheckString. It returns the old
+// value.
+func (r *Registry) SetString(name, value string) (old string, err error) {
+	if err := r.CheckString(name, value); err != nil {
+		return "", err
+	}
+	old = r.strs.Get(name).(string)
 	r.strs.Set(name, value)
-	return v.(string), nil
+	return old, nil
 }
 
 // ParseAssignment splits "name=value" as a proposal payload.

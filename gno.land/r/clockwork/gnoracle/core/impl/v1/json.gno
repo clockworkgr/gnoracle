@@ -26,7 +26,7 @@ import (
 //	json/feed/<id>/rounds[/<count>]
 //	json/feed/<id>/provider/<addr>
 //	json/feed/<id>/providers
-//	json/feed/<id>/subscribers
+//	json/feed/<id>/subscribers[/<offset>[/<count>]]
 //	json/feed/<id>/subscription/<realm path>
 //	json/dispute/<id>
 //	json/disputes[/<from>[/<count>]]
@@ -71,7 +71,7 @@ func renderJSON(st *core.StateRef, parts []string) string {
 			var rid uint64
 			if parts[3] == "current" {
 				cur, ok := schedule(f).Current(now())
-				if !ok {
+				if !ok || f.StartAt == 0 {
 					return jsonNow().Uint("feed", id).Bool("started", false).String()
 				}
 				rid = cur
@@ -109,13 +109,21 @@ func renderJSON(st *core.StateRef, parts []string) string {
 			})
 			return jsonNow().Uint("feed", id).Raw("providers", a.String()).String()
 		case "subscribers":
+			offset, count := pageArgs(parts[3:], 0, 50, 100)
 			a := jsonw.NewArray()
 			t := now()
-			core.IterateSubscriptions(id, func(s *core.Subscription) bool {
+			more := false
+			core.IterateSubscriptionsFrom(id, int(offset), int(count)+1, func(s *core.Subscription) bool {
+				if int64(a.Len()) == count {
+					more = true
+					return true
+				}
 				a.Raw(jsonSubscription(s, t).String())
 				return false
 			})
-			return jsonNow().Uint("feed", id).Int("subscriberPrice", f.Spec.SubscriberPrice).Bool("sponsored", f.Spec.Sponsored).Raw("subscribers", a.String()).String()
+			return jsonNow().Uint("feed", id).Int("subscriberPrice", f.Spec.SubscriberPrice).Bool("sponsored", f.Spec.Sponsored).
+				Bool("recurring", f.Spec.IsRecurring()).Int("offset", offset).Int("count", count).Bool("more", more).
+				Raw("subscribers", a.String()).String()
 		case "subscription":
 			if len(parts) < 4 {
 				return jsonw.Error("realm path missing")
@@ -225,16 +233,19 @@ func jsonFeed(st *core.StateRef, f *core.Feed) *jsonw.Object {
 	}
 	o := jsonNow().Uint("id", f.ID).Str("proposer", string(f.Proposer)).Bool("fromRealm", f.FromRealm).Str("status", f.Status).
 		Int("createdAt", f.CreatedAt).Int("startAt", f.StartAt).Int("deposit", f.Deposit).
-		Int("pool", f.Pool).Int("drip", f.Drip).Int("feeAccrued", f.FeeAccrued).Int("penaltyCarry", f.PenaltyCarry).Int("paidUntil", f.PaidUntil).
+		Int("pool", f.Pool).Int("drip", f.Drip).Int("penaltyCarry", f.PenaltyCarry).Int("paidUntil", f.PaidUntil).
 		Int("activeCount", f.ActiveCount).Raw("slots", slots.String()).
 		Bool("haveLast", f.HaveLast).Uint("lastFinalized", f.LastFinalized).Uint("oldestRound", f.OldestRound).Int("emptyStreak", f.EmptyStreak).
 		Bool("haveValue", f.HaveValue).Uint("lastRound", f.LastRound).Int("lastRoundAt", f.LastRoundAt).Int("lastFinalAt", f.LastFinalAt).Str("lastTier", f.LastTier)
 	if f.HaveValue {
 		last, _ := st.FeedValues(f.ID)
-		o.Int("value", last).Str("servedTier", servedTier(f, now()))
+		o.Int("value", last).Str("servedTier", servedTier(st, f, now()))
 	}
-	if cur, ok := schedule(f).Current(now()); ok {
-		o.Uint("currentRound", cur).Int("currentOpenAt", schedule(f).OpenAt(cur)).Int("currentCloseAt", schedule(f).CloseAt(cur))
+	// a proposed feed has no schedule yet (StartAt is set at activation)
+	if f.StartAt != 0 {
+		if cur, ok := schedule(f).Current(now()); ok {
+			o.Uint("currentRound", cur).Int("currentOpenAt", schedule(f).OpenAt(cur)).Int("currentCloseAt", schedule(f).CloseAt(cur))
+		}
 	}
 	return o.Bool("reopened", f.Reopened).Int("deprecatedAt", f.DeprecatedAt).Int("openDisputes", f.OpenDisputes).
 		Int("lastDisputeAt", f.LastDisputeAt).Int("disputesInRow", f.DisputesInRow).Int("subsidyPerRound", f.SubsidyPerRnd).
@@ -357,7 +368,7 @@ func renderDispute(id uint64) string {
 		out += "| resolved | " + i(d.ResolvedAt) + " |\n| slashed | " + i(d.Slashed) + " ugnot |\n"
 	}
 	out += "| evidence hash | `" + d.EvidenceHash + "` |\n\n"
-	out += "Ballot: [DAO dispute " + u(id) + "](" + webPath(core.DAOPath) + ":ballot/dispute/" + u(id) + ") · Court of record: [Kourt mirror](" + webPath(core.ParamStr("kourtRealm")) + ":dispute/" + u(id) + ")\n\n"
+	out += "Ballot: [DAO dispute " + u(id) + "](" + webPath(core.DAOPath) + ":json/ballot/dispute/" + u(id) + ") · Court of record: [Kourt mirror](" + webPath(core.ParamStr("kourtRealm")) + ":dispute/" + u(id) + ")\n\n"
 	out += "## Evidence\n\n" + esc(d.Evidence) + "\n"
 	return out
 }

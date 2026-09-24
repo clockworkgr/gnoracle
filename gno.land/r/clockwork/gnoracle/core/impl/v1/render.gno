@@ -35,7 +35,8 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 			return renderRounds(st, id)
 		}
 		if len(parts) >= 3 && parts[2] == "subscribers" {
-			return renderSubscribers(id)
+			offset, count := pageArgs(parts[3:], 0, 50, 100)
+			return renderSubscribers(id, offset, count)
 		}
 		return renderFeed(st, id)
 	case parts[0] == "provider" && len(parts) >= 3:
@@ -140,10 +141,15 @@ func renderFeed(st *core.StateRef, id uint64) string {
 	case sp.Sponsored:
 		b.WriteString("| realm access | sponsored: every realm may read |\n")
 	default:
-		b.WriteString("| realm access | " + i(sp.SubscriberPrice) + " ugnot per period per realm, " + strconv.Itoa(subscriberCount(id, now())) + " subscribed ([subscribers](:feed/" + u(id) + "/subscribers)) |\n")
+		n, more := subscriberCount(id, now())
+		count := strconv.Itoa(n)
+		if more {
+			count += "+"
+		}
+		b.WriteString("| realm access | " + i(sp.SubscriberPrice) + " ugnot per period per realm, " + count + " subscribed ([subscribers](:feed/" + u(id) + "/subscribers)) |\n")
 	}
 	b.WriteString("| value at risk | " + i(valueAtRisk(f)) + " ugnot |\n")
-	b.WriteString("| last value | " + lastValue(st, f) + " (tier " + servedTier(f, now()) + ") |\n")
+	b.WriteString("| last value | " + lastValue(st, f) + " (tier " + servedTier(st, f, now()) + ") |\n")
 	b.WriteString("| spec hash | `" + sp.Hash + "` |\n\n")
 	b.WriteString("Sources: " + esc(sp.Sources) + "\n\n")
 	b.WriteString("## Providers\n\n| slot | address | stake | misses | strikes | rewards |\n|---|---|---|---|---|---|\n")
@@ -177,7 +183,7 @@ func valueAtRisk(f *core.Feed) int64 {
 	if n == 0 {
 		return 0
 	}
-	budget := stake * param("majorSlashBps") / 10_000
+	budget := core.MulBps(stake, param("majorSlashBps"))
 	threshold := (n + 1) / 2
 	return budget / 2 * threshold / n
 }
@@ -215,37 +221,79 @@ func renderProvider(id uint64, addr address) string {
 }
 
 func renderAccount(addr address) string {
+	if !addr.IsValid() {
+		return "unknown account"
+	}
 	c := core.GetCredit(addr)
 	if c == nil {
-		return "no prepaid balance for " + string(addr)
+		return "no prepaid balance for " + esc(string(addr))
 	}
-	return "# Prepaid balance of " + string(addr) + "\n\nA realm cannot attach coins to its own calls; this balance pays its feed requests, bounties and subscriptions, and receives its refunds.\n\n| | |\n|---|---|\n| balance | " + i(c.Balance) + " ugnot |\n| spent | " + i(c.Spent) + " ugnot |\n"
+	return "# Prepaid balance of " + esc(string(addr)) + "\n\nA realm cannot attach coins to its own calls; this balance pays its feed requests, bounties and subscriptions, and receives its refunds.\n\n| | |\n|---|---|\n| balance | " + i(c.Balance) + " ugnot |\n| spent | " + i(c.Spent) + " ugnot |\n"
 }
 
-// subscriberCount is the number of realms whose subscription covers t.
-func subscriberCount(feed uint64, t int64) int {
-	n := 0
+// subscriberScan is how many subscription records the feed page looks at to
+// count the active ones; the page shows "n+" past it.
+const subscriberScan = 100
+
+// subscriberCount is the number of realms whose subscription covers t among
+// the first subscriberScan records, and whether more records exist.
+func subscriberCount(feed uint64, t int64) (n int, more bool) {
+	seen := 0
 	core.IterateSubscriptions(feed, func(s *core.Subscription) bool {
+		if seen == subscriberScan {
+			more = true
+			return true
+		}
+		seen++
 		if s.PaidUntil > t {
 			n++
 		}
 		return false
 	})
-	return n
+	return n, more
 }
 
-func renderSubscribers(id uint64) string {
+// renderSubscribers lists count subscription records from offset, in realm
+// path order: `feed/<id>/subscribers[/<offset>[/<count>]]`.
+func renderSubscribers(id uint64, offset, count int64) string {
 	f := core.GetFeed(id)
 	if f == nil {
 		return "unknown feed"
 	}
 	var b strings.Builder
-	b.WriteString("# Feed " + u(id) + " subscribers\n\nRealms that may `Read` this feed, and until when (chain time). `SubscribeRealm <feed> <realm path> <periods>` with " + i(f.Spec.SubscriberPrice) + " ugnot per period adds or extends one.\n\n| realm | since | paid until | paid | periods | active |\n|---|---|---|---|---|---|\n")
+	b.WriteString("# Feed " + u(id) + " subscribers\n\n")
+	switch {
+	case !f.Spec.IsRecurring():
+		b.WriteString("A one-off outcome is open to every realm; there is nothing to subscribe to.\n")
+		return b.String()
+	case f.Spec.Sponsored:
+		b.WriteString("A sponsored feed is free for every realm; there is nothing to subscribe to.\n")
+		return b.String()
+	}
+	b.WriteString("Realms that may `Read` this feed, and until when (chain time). `SubscribeRealm <feed> <realm path> <periods>` with " + i(f.Spec.SubscriberPrice) + " ugnot per period adds or extends one.\n\n| realm | since | paid until | paid | periods | active |\n|---|---|---|---|---|---|\n")
 	t := now()
-	core.IterateSubscriptions(id, func(s *core.Subscription) bool {
-		b.WriteString("| `" + s.Realm + "` | " + i(s.Since) + " | " + i(s.PaidUntil) + " | " + i(s.Paid) + " | " + i(s.Periods) + " | " + strconv.FormatBool(s.PaidUntil > t) + " |\n")
+	shown := int64(0)
+	more := false
+	core.IterateSubscriptionsFrom(id, int(offset), int(count)+1, func(s *core.Subscription) bool {
+		if shown == count {
+			more = true
+			return true
+		}
+		shown++
+		b.WriteString("| `" + esc(s.Realm) + "` | " + i(s.Since) + " | " + i(s.PaidUntil) + " | " + i(s.Paid) + " | " + i(s.Periods) + " | " + strconv.FormatBool(s.PaidUntil > t) + " |\n")
 		return false
 	})
+	if offset > 0 {
+		prev := offset - count
+		if prev < 0 {
+			prev = 0
+		}
+		b.WriteString("\n[previous page](:feed/" + u(id) + "/subscribers/" + i(prev) + "/" + i(count) + ")")
+	}
+	if more {
+		b.WriteString("\n[next page](:feed/" + u(id) + "/subscribers/" + i(offset+count) + "/" + i(count) + ")")
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -258,8 +306,9 @@ func popcount(m uint32) int {
 	return n
 }
 
-// esc neutralises markdown control characters in user text.
+// esc neutralises markdown control characters in user text. The replacer
+// works in one pass, so the backslashes it adds are never escaped again.
 func esc(s string) string {
-	r := strings.NewReplacer("|", "\\|", "<", "&lt;", ">", "&gt;", "[", "\\[", "]", "\\]", "\n", " ")
+	r := strings.NewReplacer("\\", "\\\\", "`", "\\`", "|", "\\|", "<", "&lt;", ">", "&gt;", "[", "\\[", "]", "\\]", "\n", " ", "\r", " ")
 	return r.Replace(s)
 }

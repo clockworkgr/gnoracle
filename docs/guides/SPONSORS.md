@@ -6,8 +6,11 @@ the protocol's revenue: 70% goes to the feed's round pools (the providers),
 
 ## Why sponsor
 
-- The feed keeps providers: a feed whose pool is empty is `unfunded`,
-  providers are not paid, and after enough empty rounds it is deprecated.
+- The feed keeps providers: a feed whose pool holds less than one round's
+  pay is `unfunded`; its rounds pay only what remains and missed rounds are
+  no longer penalised, so providers have little reason to stay. A recurring
+  feed that goes 168 consecutive rounds (`deadFeedRounds`) without a value
+  is deprecated, and its providers are unseated and start unbonding.
 - Several sponsors can pay for the same feed; each payment extends the
   feed's coverage and adds to its pool.
 - The realms that depend on the feed keep their source. A sponsor who also
@@ -27,7 +30,10 @@ gnoracle sponsor 1 3 3000gnot
 of the payment joins the pool. The drip per round is fixed from the spec's
 `subscriptionPrice` (recomputed only when a `feed-update` changes it), so a
 bigger pool lasts longer rather than paying more per round. Renew before
-`paidUntil`; the bot posts `FeedUnfunded` when a pool runs dry.
+`paidUntil`; the bot posts `FeedUnfunded` when a pool drops below one
+round's drip. A payment that brings the pool back above the drip (a
+sponsorship, or the provider share of a realm subscription) makes the feed
+active again.
 
 To fund a one-off outcome instead of a recurring feed, top up its bounty:
 `gnoracle call <core> FundBounty <feed>` with `-send`.

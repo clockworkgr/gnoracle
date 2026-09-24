@@ -8,6 +8,7 @@ import (
 
 	"gno.land/r/clockwork/gnoracle/core"
 	"gno.land/r/clockwork/gnoracle/dao"
+	"gno.land/r/clockwork/gnoracle/kourt"
 	"gno.land/r/clockwork/gnoracle/token"
 )
 
@@ -41,7 +42,7 @@ func kindRules(kind string) (rules, bool) {
 		return rules{3000, 7500, 14 * day, 7 * day}, true
 	case "authority-execute", "authority-cancel":
 		return rules{2000, 5000, 3 * day, 0}, true
-	case "trusted-requester", "kourt-abandon":
+	case "trusted-requester", "kourt-abandon", "kourt-redeem", "kourt-attribution":
 		return rules{2000, 5000, 5 * day, 0}, true
 	case "vesting":
 		return rules{2500, 6600, 5 * day, 2 * day}, true
@@ -174,11 +175,15 @@ func (*implV1) Execute(_ int, rlm realm, caller address, proposalID uint64) {
 		st.ProposalSetStatus(proposalID, dao.ProposalExpired, "not executed in time")
 		return
 	}
-	apply(st, p)
+	// recorded before the effect runs, so nothing the effect calls can see
+	// the proposal as still executable (a failed effect reverts both)
 	st.ProposalSetStatus(proposalID, dao.ProposalExecuted, "")
+	apply(st, p)
 }
 
-// Cancel withdraws the proposer's own proposal before voting ends.
+// Cancel withdraws the proposer's own proposal before voting ends. The
+// deposit is forfeited to the treasury, so cancelling cannot be used to hold
+// a proposal slot for free.
 func (*implV1) Cancel(_ int, rlm realm, caller address, proposalID uint64) {
 	st := dao.Store(0, rlm)
 	p := dao.GetProposal(proposalID)
@@ -188,7 +193,7 @@ func (*implV1) Cancel(_ int, rlm realm, caller address, proposalID uint64) {
 	if p.Status != dao.ProposalActive || now() >= p.VotingEnds {
 		panic("dao: voting has ended")
 	}
-	st.ProposalDepositRefund(proposalID)
+	st.ProposalDepositForfeit(proposalID)
 	st.ProposalSetStatus(proposalID, dao.ProposalCanceled, "withdrawn by the proposer")
 }
 
@@ -264,9 +269,21 @@ func validatePayload(kind, payload string) {
 		}
 		parseAddr(f[1], "provider")
 	case "param":
-		target, name, _, _ := parseParam(payload)
-		if target == "core" && !strings.HasPrefix(name, "") {
-			panic("dao: bad param")
+		target, name, v, str := parseParam(payload)
+		isStr := strings.Contains(payload, "=str:")
+		var err error
+		switch {
+		case target == "dao" && isStr:
+			err = dao.CheckParam(name, "str:"+str)
+		case target == "dao":
+			err = dao.CheckParam(name, strconv.FormatInt(v, 10))
+		case isStr:
+			err = core.CheckParamStr(name, str)
+		default:
+			err = core.CheckParam(name, v)
+		}
+		if err != nil {
+			panic("dao: " + err.Error())
 		}
 	case "treasury":
 		f := fields(payload, 4)
@@ -287,7 +304,7 @@ func validatePayload(kind, payload string) {
 		f := fields(payload, 2)
 		parseRealm(f[0])
 		if len(f) < 2 || !strings.HasPrefix(f[1], "gno.land/r/") {
-			panic("dao: upgrade-accept needs <core|dao> <realm path>")
+			panic("dao: upgrade-accept needs <core|dao|kourt> <realm path>")
 		}
 	case "upgrade-rollback", "freeze":
 		parseRealm(fields(payload, 1)[0])
@@ -307,11 +324,34 @@ func validatePayload(kind, payload string) {
 		if f[0] != "dao" && authspec.Kind(f[1]) != "addr" && !authspec.Grants(f[1], dao.SelfPath()) {
 			panic("dao: a realm authority for " + f[0] + " must include " + dao.SelfPath())
 		}
-	case "authority-execute", "authority-cancel":
+	case "authority-execute":
+		// bound to the transfer the members vote on: the spec must be the one
+		// pending now, and must still be pending when the proposal executes
+		f := fields(payload, 2)
+		parseRealm(f[0])
+		if len(f) < 2 || f[1] == "" {
+			panic("dao: authority-execute needs <core|dao|kourt> <authspec of the pending transfer>")
+		}
+		if _, err := authspec.Parse(f[1]); err != nil {
+			panic("dao: " + err.Error())
+		}
+		assertPendingAuthority(f[0], f[1])
+	case "authority-cancel":
 		parseRealm(fields(payload, 1)[0])
 	case "kourt-abandon":
 		f := fields(payload, 2)
 		parseUint(f[0], "dispute id")
+		if len(f) < 2 || f[1] == "" {
+			panic("dao: kourt-abandon needs <dispute id> <reason>")
+		}
+	case "kourt-redeem":
+		if parseInt(fields(payload, 1)[0], "amount") <= 0 {
+			panic("dao: kourt-redeem needs a positive amount of court coin")
+		}
+	case "kourt-attribution":
+		if t := strings.TrimSpace(payload); len(t) == 0 || len(t) > 512 {
+			panic("dao: kourt-attribution needs a text of 1 to 512 bytes")
+		}
 	case "trusted-requester":
 		f := fields(payload, 2)
 		if len(f) < 2 || !strings.HasPrefix(f[0], "gno.land/r/") {
@@ -327,6 +367,29 @@ func validatePayload(kind, payload string) {
 			panic("dao: vesting terms must not be negative")
 		}
 	case "text":
+	}
+}
+
+// pendingAuthority returns the authority transfer pending on a realm.
+func pendingAuthority(realmName string) string {
+	var spec string
+	switch realmName {
+	case "core":
+		spec, _ = core.PendingAuthority()
+	case "kourt":
+		spec, _ = kourt.PendingAuthority()
+	default:
+		spec, _ = dao.PendingAuthority()
+	}
+	return spec
+}
+
+func assertPendingAuthority(realmName, spec string) {
+	if pending := pendingAuthority(realmName); pending != spec {
+		if pending == "" {
+			panic("dao: no authority transfer is pending on " + realmName)
+		}
+		panic("dao: the transfer pending on " + realmName + " is " + strconv.Quote(pending) + ", not " + strconv.Quote(spec))
 	}
 }
 
@@ -443,7 +506,9 @@ func apply(st *dao.StateRef, p *dao.Proposal) {
 			st.ExecOwn("authority", f[1])
 		}
 	case "authority-execute":
-		switch fields(p.Payload, 1)[0] {
+		f := fields(p.Payload, 2)
+		assertPendingAuthority(f[0], f[1])
+		switch f[0] {
 		case "core":
 			st.CoreExecuteAuthority()
 		case "kourt":
@@ -462,7 +527,15 @@ func apply(st *dao.StateRef, p *dao.Proposal) {
 		}
 	case "kourt-abandon":
 		f := fields(p.Payload, 2)
-		st.KourtAbandon(parseUint(f[0], "dispute id"), f[1])
+		reason := ""
+		if len(f) > 1 {
+			reason = f[1]
+		}
+		st.KourtAbandon(parseUint(f[0], "dispute id"), reason)
+	case "kourt-redeem":
+		st.KourtRedeem(parseInt(fields(p.Payload, 1)[0], "amount"))
+	case "kourt-attribution":
+		st.KourtSetAttribution(strings.TrimSpace(p.Payload))
 	case "trusted-requester":
 		f := fields(p.Payload, 2)
 		st.CoreSetTrustedRequester(f[0], parseInt(f[1], "cap"))
@@ -474,6 +547,4 @@ func apply(st *dao.StateRef, p *dao.Proposal) {
 	default:
 		panic("dao: unknown kind")
 	}
-	// keep the compiler honest about the core import in builds without effects
-	_ = core.SelfPath
 }

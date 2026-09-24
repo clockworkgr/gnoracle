@@ -15,4 +15,5 @@ jitter = "2s"
 finalize_delay = "6s"
 [feeds.source]
 adapter = "exec"
-command = ["sh", "-c", "printf '1.00%02d\\n' $((RANDOM % 40))"]
+# awk, not $RANDOM: sh is dash on Debian and in the image, which has no RANDOM
+command = ["sh", "-c", "awk 'BEGIN { srand(); printf \"1.00%02d\\n\", int(rand() * 40) }'"]

@@ -40,11 +40,11 @@ const (
 	StateFiled     = "filed"     // claim opened
 	StateStaked    = "staked"    // stake placed on the verdict side
 	StateAnswered  = "answered"  // bonded answer posted
-	StateSettled   = "settled"   // verdict final, route undisputed
+	StateSettled   = "settled"   // verdict final and agreeing with the DAO without a vote, or closed with no decision (Verdict -1)
 	StateContested = "contested" // a Kourt holder disputed the answer
 	StateDissent   = "dissent"   // Kourt's vote disagreed with the DAO
 	StateConfirmed = "confirmed" // Kourt's vote agreed with the DAO
-	StateAbandoned = "abandoned" // closed by the authority: the claim died or the binding changed
+	StateAbandoned = "abandoned" // closed with no decision (Verdict -1): the claim died unanswered, or the authority closed a record the release cannot advance
 )
 
 // Record is one dispute's mirror.
@@ -103,7 +103,7 @@ func key(id uint64) string {
 
 // ---- entry points
 
-// Crank advances a dispute's mirror. Anyone; the notifier bot runs it daily.
+// Crank advances a dispute's mirror. Anyone; the notifier bot runs it hourly.
 func Crank(cur realm, disputeID uint64) string { return live().Crank(0, cur, disputeID) }
 
 // EnsureCourt founds the DAO's court if needed. Anyone.
@@ -129,6 +129,23 @@ func GetRecord(disputeID uint64) *Record {
 	return v.(*Record)
 }
 
+// NewestRecords returns up to count records (at most 100), newest dispute
+// first, after skipping offset of them.
+func NewestRecords(offset, count int) []*Record {
+	if count > 100 {
+		count = 100
+	}
+	out := []*Record{}
+	if offset < 0 || count <= 0 {
+		return out
+	}
+	records.ReverseIterateByOffset(offset, count, func(_ string, v any) bool {
+		out = append(out, v.(*Record))
+		return false
+	})
+	return out
+}
+
 // Count is the number of mirror records.
 func Count() uint64 { return count }
 
@@ -143,7 +160,8 @@ func SelfPath() string { return selfPath }
 // StateRef is the gated write capability for the live implementation.
 type StateRef struct{ rlm realm }
 
-// Store hands out a StateRef to the live implementation or an extension.
+// Store hands out a StateRef to the live implementation (the calls it makes
+// run under this realm's cur, so the StateRef is this realm's own).
 func Store(_ int, rlm realm) *StateRef {
 	assertStateAccess(0, rlm)
 	return &StateRef{rlm: rlm}
@@ -210,6 +228,7 @@ func (r *StateRef) Set(disputeID uint64, state string, claimID uint64, at int64,
 	if state == StateDissent {
 		emit("KourtDissent", "dispute", strconv.FormatUint(disputeID, 10), "claim", strconv.FormatUint(rec.ClaimID, 10))
 	}
+
 }
 
 // Abandon closes a record the current release cannot advance, typically one
@@ -228,6 +247,8 @@ func Abandon(cur realm, disputeID uint64, reason string) {
 	}
 	rec.State = StateAbandoned
 	rec.Route = reason
+	rec.Verdict = -1 // no decision recorded
+	rec.SettledAt = time.Now().Unix()
 	rec.Steps++
 	emit("KourtRecord", "dispute", strconv.FormatUint(disputeID, 10), "state", StateAbandoned, "claim", strconv.FormatUint(rec.ClaimID, 10))
 }
@@ -240,7 +261,7 @@ func (r *StateRef) SendToTreasury(amount int64) {
 		panic("kourt: amount must be positive")
 	}
 	if r.rlm.PkgPath() != selfPath {
-		panic("kourt: extensions may not move coins")
+		panic("kourt: only the kourt realm may move coins")
 	}
 	rlm := r.rlm
 	b := banker.NewBanker(banker.BankerTypeRealmSend, rlm)

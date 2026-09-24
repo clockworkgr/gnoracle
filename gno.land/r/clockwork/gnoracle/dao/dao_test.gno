@@ -21,6 +21,7 @@ import (
 	"gno.land/r/clockwork/gnoracle/dao/exec"
 	daoimpl "gno.land/r/clockwork/gnoracle/dao/impl/v1"
 	daoimpl2 "gno.land/r/clockwork/gnoracle/dao/impl/v2"
+	"gno.land/r/clockwork/gnoracle/kourt"
 	"gno.land/r/clockwork/gnoracle/token"
 )
 
@@ -463,11 +464,17 @@ func TestAuthorityHandoverIsTwoStep(cur realm, t *testing.T) {
 	testing.SetRealm(testing.NewUserRealm(admin))
 	nosend()
 	uassert.AbortsContains(t, cur, "timelocked", func() { dao.ExecuteAuthority(cross(cur)) })
-	// once the timelock passed, the DAO executes it through a second proposal
+	// once the timelock passed, the DAO executes it through a second
+	// proposal, which names the spec it executes: a vote for one transfer
+	// cannot execute another
 	skip(dao.AuthorityTimelock + 5)
 	testing.SetRealm(testing.NewUserRealm(alice))
 	nosend()
-	p2 := dao.Propose(cross(cur), "authority-execute", "dao", "Execute the handover")
+	uassert.AbortsContains(t, cur, "authority-execute needs", func() { dao.Propose(cross(cur), "authority-execute", "dao", "no spec") })
+	uassert.AbortsContains(t, cur, "not \"anyof:", func() {
+		dao.Propose(cross(cur), "authority-execute", "dao anyof:"+string(admin)+"|"+exec, "another spec")
+	})
+	p2 := dao.Propose(cross(cur), "authority-execute", "dao realms:"+exec, "Execute the handover")
 	dao.Vote(cross(cur), p2, "YES")
 	testing.SetRealm(testing.NewUserRealm(bob))
 	nosend()
@@ -501,7 +508,8 @@ func TestGates(cur realm, t *testing.T) {
 // TestDevSetParamIsInertOffDevChains: DevSetParam and the relaxed timing
 // floors exist for chain id "dev" (gnodev), which `make demo` exercises. The
 // harness runs realm calls under an empty chain id, so here the entry point
-// refuses everyone, authority included, and the production floors hold.
+// refuses everyone, authority included, and the defaults hold. The epoch
+// length is fixed on every chain.
 func TestDevSetParamIsInertOffDevChains(cur realm, t *testing.T) {
 	install(cur)
 	before := dao.Param("commitPeriod")
@@ -513,5 +521,83 @@ func TestDevSetParamIsInertOffDevChains(cur realm, t *testing.T) {
 	nosend()
 	uassert.AbortsContains(t, cur, "development chains only", func() { dao.DevSetParam(cross(cur), "commitPeriod", before/2) })
 	uassert.Equal(t, before, dao.Param("commitPeriod"))
-	uassert.Equal(t, int64(720), dao.Param("epochBlocks"))
+	eb := dao.Param("epochBlocks")
+	uassert.True(t, eb == 720 || eb == 10) // 10 when package init saw chain id "dev"
+	uassert.Error(t, dao.CheckParam("epochBlocks", strconv.FormatInt(eb+1, 10)))
+	uassert.Error(t, dao.CheckParam("epochBlocks", strconv.FormatInt(eb-1, 10)))
+	uassert.NoError(t, dao.CheckParam("commitPeriod", strconv.FormatInt(before+1, 10)))
+}
+
+// TestProposalPayloadsAndDeposits pins the propose-time validation of
+// payloads, the forfeited deposit of a cancelled proposal, the minimum stake
+// of an emptied position, and the kourt-attribution proposal.
+func TestProposalPayloadsAndDeposits(cur realm, t *testing.T) {
+	install(cur)
+	epoch()
+	cases := [][3]string{
+		{"param", "dao.proposeBps=999999", "out of bounds"},
+		{"param", "dao.noSuchParam=1", "unknown parameter"},
+		{"param", "dao.proposeBps=str:x", "integer parameter"},
+		{"param", "dao.epochBlocks=700", "out of bounds"},
+		{"param", "dao.settleTipBps=10", "unknown parameter"},
+		{"param", "core.missSlashBps=999999", "out of bounds"},
+		{"kourt-abandon", "5", "needs <dispute id> <reason>"},
+		{"kourt-redeem", "0", "positive amount"},
+		{"kourt-redeem", "lots", "must be an integer"},
+		{"kourt-attribution", " ", "1 to 512 bytes"},
+		{"authority-execute", "core realms:" + daoPath, "no authority transfer is pending"},
+	}
+	for _, c := range cases {
+		testing.SetRealm(testing.NewUserRealm(alice))
+		nosend()
+		uassert.AbortsContains(t, cur, c[2], func() { dao.Propose(cross(cur), c[0], c[1], "bad") })
+	}
+
+	// a cancelled proposal's deposit goes to the treasury
+	treasury := dao.TreasuryUgnot()
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	payDAO(20 * gnot)
+	pid := dao.Propose(cross(cur), "text", "squat", "Hold a slot")
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	dao.Cancel(cross(cur), pid)
+	uassert.Equal(t, dao.ProposalCanceled, dao.GetProposal(pid).Status)
+	uassert.Equal(t, int64(0), dao.GetProposal(pid).Deposit)
+	uassert.Equal(t, treasury+20*gnot, dao.TreasuryUgnot())
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	uassert.Equal(t, int64(0), dao.SyncFees(cross(cur))) // not fee income either
+	health(t)
+
+	// an emptied position restakes at least the minimum
+	dusty := testutils.TestAddress("dusty")
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	token.Transfer(cross(cur), dusty, 10*pyth)
+	stake(cur, dusty, 1*pyth)
+	testing.SetRealm(testing.NewUserRealm(dusty))
+	nosend()
+	dao.RequestUnstake(cross(cur), 1*pyth)
+	uassert.Equal(t, int64(0), dao.GetMember(dusty).Staked)
+	testing.SetRealm(testing.NewUserRealm(dusty))
+	nosend()
+	token.Approve(cross(cur), daoAddr, 1)
+	uassert.AbortsContains(t, cur, "stake at least", func() { dao.Stake(cross(cur), 1) })
+
+	// the DAO sets the Kourt attribution notice by proposal
+	text := "[built on Kourt](https://kourt.xyz), mirrored by the Gnoracle DAO"
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	ka := dao.Propose(cross(cur), "kourt-attribution", text, "Attribution")
+	dao.Vote(cross(cur), ka, "YES")
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	dao.Vote(cross(cur), ka, "YES")
+	skip(5*day + 5)
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	dao.Execute(cross(cur), ka)
+	uassert.Equal(t, dao.ProposalExecuted, dao.GetProposal(ka).Status)
+	uassert.True(t, strings.HasPrefix(kourt.Render(cross(cur), ""), text+"\n"))
+	health(t)
 }

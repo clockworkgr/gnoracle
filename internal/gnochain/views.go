@@ -8,8 +8,10 @@ import (
 )
 
 // The structs below mirror the realms' `:json/...` views (core/impl/v1
-// json.gno, dao/impl/v1 json.gno, kourt/impl/v1). Unknown fields are ignored
-// so a newer release may add members without breaking older tools.
+// json.gno, dao/impl/v1 json.gno, and the kourt mirror's record view from
+// kourt/impl/kourtv3, or kourt/impl/v1 on dev chains with the stand-in court).
+// Unknown fields are ignored so a newer release may add members without
+// breaking older tools.
 
 // Head is on every core object.
 type Head struct {
@@ -369,6 +371,10 @@ type SubscribersInfo struct {
 	Feed            uint64             `json:"feed"`
 	SubscriberPrice int64              `json:"subscriberPrice"`
 	Sponsored       bool               `json:"sponsored"`
+	Recurring       bool               `json:"recurring"`
+	Offset          int64              `json:"offset"`
+	Count           int64              `json:"count"`
+	More            bool               `json:"more"` // another page follows
 	Subscribers     []SubscriptionInfo `json:"subscribers"`
 }
 
@@ -402,8 +408,12 @@ func (r *KourtRecord) Terminal() bool {
 // Due reports whether a crank at chain time now can advance the record:
 // Kourt v3 needs three epochs (about 3 h) of stake history before an
 // answer and 72 h after the answer before an undisputed settlement; the
-// stand-in uses the same waits. A crank that is due may still find nothing
-// to do (a priority window, a vote in progress) and returns the same state.
+// stand-in uses the same waits. It is a lower bound: once a court has
+// qualified answerers, Kourt v3 also holds the mirror's answer back for their
+// 24 h priority window, and the record view does not say whether that gate is
+// active, so a staked record can be due here for up to a day before a crank
+// moves it. A crank that is due may still find nothing to do (that priority
+// window, a vote in progress) and returns the same state.
 func (r *KourtRecord) Due(now int64) bool {
 	switch r.State {
 	case "staked":
@@ -582,9 +592,25 @@ func (c *Client) Proposal(dao string, id uint64) (*ProposalInfo, error) {
 
 // ---- subscription readers
 
+// Subscribers reads every page of json/feed/<id>/subscribers (100 per
+// page) and returns them as one list.
 func (c *Client) Subscribers(core string, feed uint64) (*SubscribersInfo, error) {
-	var s SubscribersInfo
-	return &s, c.JSONView(core, "feed/"+u(feed)+"/subscribers", &s)
+	var all *SubscribersInfo
+	for offset := 0; ; offset += 100 {
+		var s SubscribersInfo
+		if err := c.JSONView(core, fmt.Sprintf("feed/%d/subscribers/%d/100", feed, offset), &s); err != nil {
+			return nil, err
+		}
+		if all == nil {
+			all = &s
+		} else {
+			all.Subscribers = append(all.Subscribers, s.Subscribers...)
+		}
+		if !s.More || len(s.Subscribers) == 0 {
+			all.More, all.Offset, all.Count = false, 0, int64(len(all.Subscribers))
+			return all, nil
+		}
+	}
 }
 
 func (c *Client) Subscription(core string, feed uint64, realmPath string) (*SubscriptionInfo, error) {

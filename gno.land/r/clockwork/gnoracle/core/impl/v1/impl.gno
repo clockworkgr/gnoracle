@@ -1,6 +1,6 @@
 // Package impl is the first implementation of the Gnoracle core: feeds,
-// providers, rounds, sponsorships, realm subscriptions and reads. Disputes are refused
-// here and arrive with a later release.
+// providers, rounds, sponsorships, realm subscriptions, reads, disputes
+// (ballots run on the DAO through the core's BallotHouse), and the pages.
 //
 // Nothing in this realm is state. Every record lives in the core realm and is
 // reached through core.Store with the core's own cur, so accepting a later

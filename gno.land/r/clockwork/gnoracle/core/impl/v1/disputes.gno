@@ -80,7 +80,7 @@ func disputeBond(f *core.Feed, t int64) int64 {
 			stake += p.Stake
 		}
 	}
-	bond := stake * param("disputeBondBps") / 10_000
+	bond := core.MulBps(stake, param("disputeBondBps"))
 	if minB := param("minDisputeBond"); bond < minB {
 		bond = minB
 	}
@@ -174,7 +174,7 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 		if outcome != d.FirstOutcome {
 			st.BondRelease(d.ID, d.Appellant, d.AppealBond)
 		} else {
-			consumed := d.AppealBond * param("appealConsumeBps") / 10_000
+			consumed := core.MulBps(d.AppealBond, param("appealConsumeBps"))
 			half := consumed / 2
 			st.BondToVoters(d.ID, half)
 			st.BondToFees(d.ID, consumed-half)
@@ -185,8 +185,8 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 	var slashed int64
 	switch outcome {
 	case "UPHOLD":
-		toProviders := d.Bond * winnerBps / 10_000
-		toVoters := d.Bond * votersBps / 10_000
+		toProviders := core.MulBps(d.Bond, winnerBps)
+		toVoters := core.MulBps(d.Bond, votersBps)
 		st.BondToPool(d.ID, d.Feed, toProviders)
 		st.BondToVoters(d.ID, toVoters)
 		st.BondToFees(d.ID, d.Bond-toProviders-toVoters)
@@ -204,7 +204,12 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 			if holder == "" {
 				continue
 			}
-			if agg.WithinTolerance(st.RoundValueAt(d.Feed, d.Round, s), d.ProposedValue, f.Spec.ToleranceBps) {
+			// a provider that submitted the value the dispute established is
+			// not slashed: the same value for a categorical feed, a value
+			// within tolerance of it for a numeric one
+			submitted := st.RoundValueAt(d.Feed, d.Round, s)
+			if f.Spec.IsNumeric() && agg.WithinTolerance(submitted, d.ProposedValue, f.Spec.ToleranceBps) ||
+				!f.Spec.IsNumeric() && submitted == d.ProposedValue {
 				continue
 			}
 			effTier, effBps := tier, bps
@@ -223,15 +228,15 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 			// of record of past rounds never change
 			slashed += st.SlashProvider(d.Feed, holder, effBps, effTier, obligedFrom(f))
 		}
-		toDisputer := slashed * winnerBps / 10_000
-		toVoters := slashed * votersBps / 10_000
+		toDisputer := core.MulBps(slashed, winnerBps)
+		toVoters := core.MulBps(slashed, votersBps)
 		st.BondRelease(d.ID, d.Disputer, toDisputer)
 		st.BondToVoters(d.ID, toVoters)
 		st.BondToFees(d.ID, slashed-toDisputer-toVoters)
 		st.BondRelease(d.ID, d.Disputer, d.Bond)
 		st.RoundOverturn(d.Feed, d.Round, d.ProposedValue)
 	case "VOID":
-		consumed := d.Bond * param("voidConsumeBps") / 10_000
+		consumed := core.MulBps(d.Bond, param("voidConsumeBps"))
 		half := consumed / 2
 		st.BondToVoters(d.ID, half)
 		st.BondToFees(d.ID, consumed-half)
@@ -249,12 +254,17 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 }
 
 // ReopenOneOff gives a voided one-off feed a new resolve time (requester,
-// once).
+// once). The new round 0 is owed by the providers seated now: active
+// providers are obliged to it; jailed or departed ones are not (a jailed
+// provider that unjails before the new resolve time is seated for it again).
 func (*implV1) ReopenOneOff(_ int, rlm realm, caller address, feedID uint64, resolveAt int64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
 	if f.Spec.IsRecurring() {
 		panic("gnoracle: only one-off feeds reopen")
+	}
+	if !isServing(f) {
+		panic("gnoracle: feed is not active")
 	}
 	if caller != f.Proposer {
 		panic("gnoracle: only the requester may reopen")
@@ -271,4 +281,16 @@ func (*implV1) ReopenOneOff(_ int, rlm realm, caller address, feedID uint64, res
 		panic("gnoracle: resolveAt must be between 1 hour and 2 years ahead")
 	}
 	st.FeedResetForReopen(feedID, resolveAt)
+	var all []*core.Provider
+	core.IterateProviders(feedID, func(p *core.Provider) bool {
+		all = append(all, p)
+		return false
+	})
+	for _, p := range all {
+		if p.Status == core.ProviderActive {
+			st.ProviderSetObligedFrom(feedID, p.Addr, 0)
+		} else {
+			st.ProviderSetObligedFrom(feedID, p.Addr, 1)
+		}
+	}
 }

@@ -114,3 +114,23 @@ func TestParseAssignmentAndRender(t *testing.T) {
 	js := r.JSON()
 	uassert.Equal(t, `{"missSlashBps":50,"disputeQuorumBps":3300,"maxProviders":15,"stakeDenom":"ugnot"}`, js)
 }
+
+func TestCheckDoesNotMutate(t *testing.T) {
+	r := registry()
+	uassert.NoError(t, r.Check("missSlashBps", 75))
+	uassert.Error(t, r.Check("missSlashBps", 501)) // out of bounds
+	uassert.Error(t, r.Check("missSlashBps", 100)) // more than the change limit
+	uassert.Error(t, r.Check("stakeDenom", 1))     // a string parameter
+	uassert.Error(t, r.Check("nope", 1))
+	uassert.Equal(t, int64(50), r.Int("missSlashBps"))
+
+	uassert.NoError(t, r.CheckString("stakeDenom", "uatom"))
+	uassert.Error(t, r.CheckString("missSlashBps", "x")) // not a string parameter
+	long := make([]byte, 257)
+	uassert.Error(t, r.CheckString("stakeDenom", string(long)))
+	uassert.Equal(t, "ugnot", r.Str("stakeDenom"))
+	old, err := r.SetString("stakeDenom", "uatom")
+	uassert.NoError(t, err)
+	uassert.Equal(t, "ugnot", old)
+	uassert.Equal(t, "uatom", r.Str("stakeDenom"))
+}

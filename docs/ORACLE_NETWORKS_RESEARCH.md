@@ -1,4 +1,4 @@
-<!-- Raw research pass on incumbent oracle networks, produced 2026-09-23 for the Gnoracle plan. Kept verbatim for its citations (about 190 URLs). Items marked UNVERIFIED were not confirmed against a primary source. The plan (IMPLEMENTATION_PLAN.md) and the summary in RESEARCH.md section 3.2 are the reviewed conclusions. -->
+<!-- Raw research pass on incumbent oracle networks, produced 2026-09-23 for the Gnoracle plan. Kept verbatim for its citations (about 190 URLs). Items marked UNVERIFIED were not confirmed against a primary source. The plan (IMPLEMENTATION_PLAN.md) and the summary in RESEARCH.md section 3.2 are the reviewed conclusions. Where this pass recommends metered per-read fees, a prepaid read-credit ledger or a delayed public tier (§9.2, §10.2, §10.3 #21), the plan decided otherwise: realms read free per call under a per-period subscription (or free on sponsored and one-off feeds), and there is no delayed tier. -->
 
 # Economics and Mechanism Design of Decentralized Oracle Networks — Research for a gno.land Oracle DAO
 

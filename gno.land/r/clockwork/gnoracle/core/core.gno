@@ -9,12 +9,14 @@
 // moves between versions and money never leaves except through the primitives
 // in money.gno, which are declared here and therefore cannot be upgraded.
 //
-// Authority: the address in Admin until the DAO realm takes over through
-// TransferAuthorityToRealms; the same authority accepts releases, activates
-// feeds and changes parameters. See docs/IMPLEMENTATION_PLAN.md §3.2.
+// Authority: the address in Admin until the DAO realm takes over through the
+// two-step, timelocked ProposeAuthority / ExecuteAuthority; the same
+// authority accepts releases, activates feeds and changes parameters. See
+// docs/IMPLEMENTATION_PLAN.md §3.2.
 package core
 
 import (
+	"chain"
 	"chain/runtime"
 	"chain/runtime/unsafe"
 	"strconv"
@@ -35,11 +37,15 @@ const StakeDenom = "ugnot"
 var (
 	proxy    *upgradeable.Proxy
 	selfPath string
+	// authSpec is the authspec text of the authority in force, kept so the
+	// realms it grants can be recognised by their package address
+	authSpec string
 )
 
 func init(cur realm) {
 	selfPath = cur.PkgPath()
 	proxy = upgradeable.New(upgradeable.NewAddrAuthority(Admin))
+	authSpec = "addr:" + string(Admin)
 	defineParams()
 }
 
@@ -154,7 +160,8 @@ func Finalize(cur realm, feedID, roundID uint64) {
 	live().Finalize(0, cur, cur.Previous().Address(), feedID, roundID)
 }
 
-// CatchUp writes off up to maxRounds stale rounds of a feed nobody finalised.
+// CatchUp finalises up to maxRounds closed rounds of a feed nobody finalised
+// (rounds nobody submitted to are written off as skipped).
 func CatchUp(cur realm, feedID uint64, maxRounds int64) int64 {
 	return live().CatchUp(0, cur, cur.Previous().Address(), feedID, maxRounds)
 }
@@ -165,7 +172,10 @@ func PruneRounds(cur realm, feedID uint64, maxRounds int64) int64 {
 	return live().PruneRounds(0, cur, cur.Previous().Address(), feedID, maxRounds)
 }
 
-// PruneFeed deletes a deprecated feed once its rounds are gone.
+// PruneFeed deletes a deprecated feed once its rounds are gone. Its index
+// entries (slot log, sponsorships, subscriptions) are removed in bounded
+// batches, so a feed with many entries takes several calls; the feed record
+// goes with the last batch.
 func PruneFeed(cur realm, feedID uint64) {
 	live().PruneFeed(0, cur, cur.Previous().Address(), feedID)
 }
@@ -253,13 +263,19 @@ func WithdrawCredit(cur realm, amount int64) {
 // subscription, nor does a feed's own realm requester.
 func SubscribeRealm(cur realm, feedID uint64, pkgPath string, periods int64) {
 	prev := cur.Previous()
-	live().SubscribeRealm(0, cur, prev.Address(), prev.PkgPath(), feedID, pkgPath, periods, unsafe.OriginSend().AmountOf(StakeDenom))
+	sent := int64(0)
+	if prev.IsUserCall() {
+		sent = unsafe.OriginSend().AmountOf(StakeDenom)
+	}
+	live().SubscribeRealm(0, cur, prev.Address(), prev.PkgPath(), feedID, pkgPath, periods, sent)
 }
 
 // Read returns the latest served value of a feed to a subscribed realm. It
 // is a crossing call so the reader is known, changes no state and costs
-// nothing per call. tier is consensus, provisional, final, disputed, stale
-// or none, with ",unfunded" appended while the feed's pool is empty. People
+// nothing per call. tier is consensus, provisional, final, disputed, void,
+// stale or none, with ",unfunded" appended while the feed's pool cannot cover a round's drip.
+// While the latest round is disputed or void the last final round is served
+// in its place. People
 // and off-chain readers use the pages and the :json views, which show every
 // value: what a subscription buys is the right to use a value inside a
 // realm's own logic.
@@ -275,7 +291,9 @@ func ReadFinal(cur realm, feedID uint64) (value int64, decimals int64, roundID u
 	return live().ReadFinal(0, cur, prev.Address(), prev.PkgPath(), feedID)
 }
 
-// ReadRound returns one specific round to a subscribed realm.
+// ReadRound returns one specific round to a subscribed realm. tier is the
+// round's tier, or its status when it produced no value (empty, skipped,
+// void), or none when the round is open or does not exist.
 func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64) {
 	prev := cur.Previous()
 	return live().ReadRound(0, cur, prev.Address(), prev.PkgPath(), feedID, roundID)
@@ -329,7 +347,7 @@ func SetTrustedRequester(cur realm, pkgPath string, cap int64) {
 
 // ------------------------------------------------------------- proxy ----
 
-// Register records the calling realm as a candidate implementation. An
+// RegisterImpl records the calling realm as a candidate implementation. An
 // implementation realm calls it from its own init.
 func RegisterImpl(cur realm, impl Core) { proxy.Propose(0, cur, impl) }
 
@@ -339,7 +357,7 @@ func Accept(cur realm, pkgPath string) {
 	emit("ReleaseAccepted", "path", pkgPath)
 }
 
-// Withdraw drops a candidate. Authority, or the candidate realm itself.
+// WithdrawImpl drops a candidate. Authority, or the candidate realm itself.
 func WithdrawImpl(cur realm, pkgPath string) { proxy.Withdraw(0, cur, pkgPath) }
 
 // Rollback restores the previous release. Authority only.
@@ -412,7 +430,23 @@ func ExecuteAuthority(cur realm) {
 	spec := pendingAuth.Spec
 	pendingAuth = nil
 	proxy.TransferAuthority(0, cur, auth)
+	authSpec = spec
 	emit("AuthorityTransferred", "authority", spec)
+}
+
+// IsAuthority reports whether addr holds the authority: the authority's key,
+// or the package address of a realm it grants. Releases use it to gate
+// operations they add through Invoke, which knows the caller's address only.
+func IsAuthority(addr address) bool {
+	if proxy.Authority().Authorized(addr, "") {
+		return true
+	}
+	for _, p := range authspec.Realms(authSpec) {
+		if chain.PackageAddress(p) == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // CancelAuthority drops the pending transfer. Authority only.
@@ -445,8 +479,8 @@ func Invoke(cur realm, method, args string) string {
 	return live().Invoke(0, cur, prev.Address(), prev.IsUserCall(), sent, method, args)
 }
 
-// LiveImpl returns the live implementation as an untyped value, the hook
-// that lets extension realms grow the API.
+// LiveImpl returns the live implementation as an untyped value, for
+// inspection; new operations reach it through Invoke.
 func LiveImpl() any {
 	v, ok := proxy.TryImpl()
 	if !ok {
@@ -498,7 +532,16 @@ func live() Core {
 }
 
 // Render delegates to the live implementation under a permanent header.
+//
+// The pages and the :json views show every value, so they serve people and
+// off-chain readers only: a realm calling Render would read values without
+// the subscription Read requires, and is turned away. User calls (vm/qrender,
+// a MsgCall) and MsgRun scripts (gno.land/e/..., equivalent to off-chain)
+// are served.
 func Render(cur realm, path string) string {
+	if p := cur.Previous().PkgPath(); strings.HasPrefix(p, "gno.land/r/") && p != selfPath {
+		return "# Gnoracle core\n\nPages serve people and off-chain readers; realms read values through Read.\n"
+	}
 	var b strings.Builder
 	if path == "releases" {
 		b.WriteString("# Gnoracle core: releases\n\n")

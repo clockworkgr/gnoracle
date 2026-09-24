@@ -42,19 +42,27 @@ func (*implV1) OpenDisputeVote(_ int, rlm realm, disputeID uint64, majorRequeste
 	return openBallot(st, disputeID, 1, majorRequested, summary, 0)
 }
 
-// OpenAppealRound seals a round-2 ballot after a decided round 1.
+// OpenAppealRound seals a round-2 ballot after a decided round 1. Round 2
+// decides the dispute, so round 1 is re-resolved as a roll: no rewards, no
+// incoherence, only absence and abstention charged (to the treasury), and it
+// is final at once so settlement never waits on it.
 func (*implV1) OpenAppealRound(_ int, rlm realm, disputeID uint64) uint64 {
 	st := dao.Store(0, rlm)
 	seq := dao.BallotOf(disputeID)
 	b := dao.GetBallot(seq)
-	if b == nil || b.Phase != dao.BallotResolved || b.Round != 1 {
-		panic("dao: no decided round-1 ballot to appeal")
+	if b == nil || b.Phase != dao.BallotResolved || b.Round != 1 || b.Final {
+		panic("dao: no decided, unapplied round-1 ballot to appeal")
 	}
+	raw := tally.Weights{Uphold: b.Uphold, Overturn: b.Overturn, OverturnMinor: b.OverturnMinor, Void: b.Void, Abstain: b.Abstain}
+	rolled := tally.Result{Outcome: tally.OutcomeRoll, Revealed: raw.Total(), Obligated: b.Obligated, Weights: raw}
+	st.BallotSupersede(seq, tally.ExpectedPenaltyPool(rolled, 0, ballotRates()))
 	return openBallot(st, disputeID, 2, b.MajorRequested, b.Summary, seq)
 }
 
-// FundVoters records coins the core sent for the dispute's latest resolved
-// ballot.
+// FundVoters records coins the core sent for the dispute's latest ballot
+// and marks it final (the core calls it when it applies the outcome). A
+// round-2 ballot's round 1 is final already; marking it again is harmless
+// and keeps a round 1 from ever blocking settlement.
 func (*implV1) FundVoters(_ int, rlm realm, disputeID uint64, amount int64) {
 	st := dao.Store(0, rlm)
 	seq := dao.BallotOf(disputeID)
@@ -62,10 +70,19 @@ func (*implV1) FundVoters(_ int, rlm realm, disputeID uint64, amount int64) {
 	if b == nil {
 		panic("dao: unknown dispute")
 	}
-	if b.Phase != dao.BallotResolved && b.PrevSeq != 0 {
-		seq = b.PrevSeq
+	if b.Phase != dao.BallotResolved {
+		panic("dao: the dispute's ballot is still running")
 	}
 	st.BallotFund(seq, amount)
+	if b.PrevSeq != 0 {
+		if prev := dao.GetBallot(b.PrevSeq); prev != nil && !prev.Final {
+			st.BallotFund(b.PrevSeq, 0)
+		}
+	}
+}
+
+func ballotRates() tally.Rates {
+	return tally.Rates{AbsenceBps: param("absenceSlashBps"), IncoherenceBps: param("incoherenceSlashBps"), AbstainBps: param("abstainSlashBps")}
 }
 
 func memberWeight(voter address, sealed uint32) int64 {
@@ -162,7 +179,7 @@ func (*implV1) FinishDisputeVote(_ int, rlm realm, disputeID uint64) (string, st
 	raw := tally.Weights{Uphold: b.Uphold, Overturn: b.Overturn, OverturnMinor: b.OverturnMinor, Void: b.Void, Abstain: b.Abstain}
 	clipped, removed := tally.Clip(raw, decodeTop(b.TopReveals), param("maxVoterShareBps"), b.Obligated)
 	res := tally.Decide(clipped, b.Obligated, ballotRules(b.Round, b.MajorRequested))
-	rates := tally.Rates{AbsenceBps: param("absenceSlashBps"), IncoherenceBps: param("incoherenceSlashBps"), AbstainBps: param("abstainSlashBps")}
+	rates := ballotRates()
 	// penalties and rewards follow members' real weights, so the pool and the
 	// coherent weight are computed on the raw tally under the decided outcome
 	rawRes := tally.Result{Outcome: res.Outcome, Tier: res.Tier, Quorate: res.Quorate, Revealed: raw.Total(), Obligated: b.Obligated, Weights: raw}

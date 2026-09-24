@@ -24,7 +24,9 @@ func (*implV1) WithdrawCredit(_ int, rlm realm, account address, amount int64) {
 }
 
 // SubscribeRealm pays periods of a recurring feed's subscriberPrice for a
-// realm. Overpayment joins the pool like a sponsor's.
+// realm. The whole payment, overpayment included, is split like a sponsor's:
+// feeSplitProvidersBps (70%) to the feed's pool, the rest (30%) to the fees
+// forwarded to the DAO.
 func (*implV1) SubscribeRealm(_ int, rlm realm, payer address, payerPkg string, feedID uint64, pkgPath string, periods int64, sent int64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
@@ -32,17 +34,19 @@ func (*implV1) SubscribeRealm(_ int, rlm realm, payer address, payerPkg string, 
 		panic("gnoracle: feed is not active")
 	}
 	if !f.Spec.IsRecurring() {
-		panic("gnoracle: a one-off outcome is open to every realm once final; there is nothing to subscribe to")
+		panic("gnoracle: a one-off outcome is open to every realm; there is nothing to subscribe to")
 	}
 	if f.Spec.Sponsored {
 		panic("gnoracle: a sponsored feed is free for every realm; there is nothing to subscribe to")
 	}
-	if !strings.HasPrefix(pkgPath, "gno.land/r/") || len(pkgPath) > 128 {
-		panic("gnoracle: pkgPath must be the reading realm's gno.land/r/ path")
+	if !validRealmPath(pkgPath) {
+		panic("gnoracle: pkgPath must be a realm path: gno.land/r/ then lowercase segments of a-z, 0-9 and _ separated by single slashes, at most 128 bytes")
 	}
 	if periods < 1 || periods > 12 {
 		panic("gnoracle: periods must be between 1 and 12")
 	}
+	// subscriberPrice is at most spec.MaxAmount (1e15) and periods at most
+	// 12, so the product cannot overflow
 	required := f.Spec.SubscriberPrice * periods
 	t := now()
 	base := t
@@ -54,23 +58,60 @@ func (*implV1) SubscribeRealm(_ int, rlm realm, payer address, payerPkg string, 
 		if sent != 0 {
 			panic("gnoracle: a realm cannot attach coins; its prepaid balance pays")
 		}
-		st.SubscribeFromCredit(payer, feedID, pkgPath, required, until)
-		return
+		st.SubscribeFromCredit(payer, feedID, pkgPath, required, periods, until)
+	} else {
+		if sent < required {
+			panic("gnoracle: send at least " + i(required) + StakeUnit + " (" + i(periods) + " x subscriberPrice " + i(f.Spec.SubscriberPrice) + ")")
+		}
+		st.SubscribePay(feedID, pkgPath, sent, periods, until)
 	}
-	if sent < required {
-		panic("gnoracle: send at least " + i(required) + StakeUnit + " (" + i(periods) + " x subscriberPrice " + i(f.Spec.SubscriberPrice) + ")")
+	// the provider share may have refilled an unfunded feed's pool
+	if f = mustFeed(feedID); f.Status == core.FeedUnfunded && f.Pool >= f.Drip {
+		st.FeedSetStatus(feedID, core.FeedActive)
 	}
-	st.SubscribePay(feedID, pkgPath, sent, until)
+}
+
+// validRealmPath reports whether p is gno.land/r/ followed by one or more
+// segments of [a-z0-9_], separated by single slashes, at most 128 bytes: the
+// shape of a realm path, and nothing a page could render as markup.
+func validRealmPath(p string) bool {
+	const prefix = "gno.land/r/"
+	if len(p) > 128 || !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	rest := p[len(prefix):]
+	if rest == "" {
+		return false
+	}
+	segLen := 0
+	for k := 0; k < len(rest); k++ {
+		c := rest[k]
+		switch {
+		case c == '/':
+			if segLen == 0 {
+				return false
+			}
+			segLen = 0
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_':
+			segLen++
+		default:
+			return false
+		}
+	}
+	return segLen > 0
 }
 
 // servedTier is the tier a feed's latest value is served under at time t.
-func servedTier(f *core.Feed, t int64) string {
+// A consensus or provisional value is labelled final only once it is the
+// last final round, the one ReadFinal returns: its own dispute window having
+// passed is not enough while an earlier round's dispute holds promotion back.
+func servedTier(st *core.StateRef, f *core.Feed, t int64) string {
 	if !f.HaveValue {
 		return "none"
 	}
 	tier := f.LastTier
-	if tier == "consensus" || tier == "provisional" {
-		if t >= f.LastFinalAt+f.Spec.DisputeWindow {
+	if (tier == "consensus" || tier == "provisional") && t >= f.LastFinalAt+f.Spec.DisputeWindow {
+		if _, fr, _, ok := latestFinal(st, f, t); ok && fr == f.LastRound {
 			tier = "final"
 		}
 	}
@@ -121,7 +162,7 @@ func (*implV1) Read(_ int, rlm realm, caller address, callerPkg string, feedID u
 	t := now()
 	mayRead(f, caller, callerPkg, t)
 	dec := int64(f.Spec.Decimals)
-	tier := servedTier(f, t)
+	tier := servedTier(st, f, t)
 	suffix := ""
 	if f.Status == core.FeedUnfunded {
 		suffix = ",unfunded"
@@ -134,7 +175,9 @@ func (*implV1) Read(_ int, rlm realm, caller address, callerPkg string, feedID u
 		if !ok {
 			return 0, dec, 0, 0, tier
 		}
-		if f.LastTier == "void" {
+		// the void round is replaced by the last final round, served as
+		// final unless the feed has gone stale
+		if f.LastTier == "void" && !strings.HasPrefix(tier, "stale") {
 			tier = "final" + suffix
 		}
 		return fv, dec, fr, fa, tier
@@ -217,5 +260,3 @@ func (*implV1) ReadRound(_ int, rlm realm, caller address, callerPkg string, fee
 	}
 	return st.RoundValue(feedID, roundID), tier, rd.FinalisedAt
 }
-
-func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }

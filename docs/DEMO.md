@@ -7,7 +7,7 @@ consumer realm that reads it, a dispute, the DAO's commit-reveal ballot, and
 the verdict filed as a claim in the DAO's court on Kourt v3.
 
 ```sh
-make toolchain deps go-build   # once: the pinned gno tools, the on-chain dependency mirror, the Go binaries
+make toolchain deps go-build   # once: the pinned gno, gnokey and gnodev, the on-chain dependency mirror, the Go binaries
 make demo                      # starts a local chain (gnodev with gnoweb) if none listens on 36657, else uses it
 RESET=1 make demo              # same, but reset a running dev chain first
 make demo-stop                 # stop the agents, bot, poller and a chain the demo started (KEEP_CHAIN=1 keeps it)
@@ -15,7 +15,9 @@ make demo-stop                 # stop the agents, bot, poller and a chain the de
 
 The script prints a link to each page as it comes to life; gnoweb is at
 `http://127.0.0.1:38888` (`WEB=` to change it; `RPC=` for the node, default
-36657). Logs land in `.dev-agent/demo/`.
+36657). Logs land in `.dev-agent/demo/`. The demo starts its chain with the
+gnodev that `make toolchain` builds; if none is there it runs `make
+toolchain` first (`GNODEV=` points it at another binary).
 
 ## What happens, in order
 
@@ -23,14 +25,14 @@ The script prints a link to each page as it comes to life; gnoweb is at
 |---|---|---|
 | Chain | gnodev starts with the realms, the Kourt v3 realm's mirrored source at its mainnet path and the example reader realm; gnoweb comes up | the five realm links printed first |
 | Releases | the guardian key (`test1`) accepts `core/impl/v1`, `dao/impl/v1` and `kourt/impl/kourtv3` | `core:releases`, `dao:releases`, `kourt` |
-| Clocks | Kourt's test clock is armed; the ballot, appeal and epoch clocks are shortened (table below) | the `:params` pages |
+| Clocks | Kourt's test clock is armed; the ballot and appeal clocks are shortened (table below) | the `:params` pages |
 | Keys | three provider keys, two member keys, a challenger, a bot key and a poller key are created in `.dev-keys/` and funded | |
-| Members | `test1`, `voter1` and `voter2` each stake 100,000 PYTH; their weight counts from the next epoch (ten blocks here) | `dao:members` |
+| Members | `test1`, `voter1` and `voter2` each stake 100,000 PYTH; their weight counts from the next epoch (ten blocks on a `dev` chain) | `dao:members` |
 | Feed | `DEMO/USD` (one-minute rounds) is proposed and activated; the three providers register 1,000 GNOT each; the reader realm is subscribed for one period (10 GNOT) | `core:feed/1`, `core:feed/1/subscribers` |
-| Live phase | three agents (http and exec adapters) submit every round, the bot announces finalisations, and the reader realm polls the feed every 20 s, keeping each value with its block height | `core:feed/1/rounds`, `demo/reader`, `.dev-agent/demo/bot.log` |
+| Live phase | three agents (http and exec adapters) submit every round, the bot announces finalisations and cranks the Kourt mirror every 2 minutes, and the reader realm polls the feed every 20 s, keeping each value with its block height | `core:feed/1/rounds`, `demo/reader`, `.dev-agent/demo/bot.log` |
 | Dispute | the challenger contests the round the reader last read, proposing a value 5% higher (minor tier, 2,500 GNOT bond); the ballot opens | `core:dispute/1` |
 | Ballot | the three members commit `UPHOLD`, reveal when the phase turns, the ballot is counted, the appeal window passes, the dispute resolves: the challenger forfeits the bond | `core:dispute/1`, `dao:member/<address>` |
-| Kourt | the mirror founds court `gnoracle` on the Kourt v3 realm, `test1` buys court coin and moves 20 CC into the mirror's float, the verdict is filed as claim 1, staked, answered and settled | `kourtv3:gnoracle`, `kourtv3:gnoracle/1`, `kourt:dispute/1` |
+| Kourt | the mirror founds court `gnoracle` on the Kourt v3 realm, `test1` buys court coin for 10 GNOT and moves 20 CC into the mirror's float, the verdict is filed as claim 1, staked, answered and settled | `kourtv3:gnoracle`, `kourtv3:gnoracle/1`, `kourt:dispute/1` |
 
 Afterwards the agents keep producing rounds and the reader keeps reading, so
 the feed and reader pages grow while you browse. The bot posts to its log
@@ -49,17 +51,21 @@ entry point, which refuses on any other chain.
 | `dao.commitPeriod` | 24 h | 60 s | `DevSetParam` (dev floor 30 s; 6 h elsewhere) |
 | `dao.revealPeriod` | 24 h | 60 s | same |
 | `core.appealWindow` | 24 h | 30 s | guardian `SetParam` (dev floor 10 s; 1 h elsewhere) |
-| `dao.epochBlocks` | 720 blocks, fixed | 10 blocks | `DevSetParam` (dev floor 10; fixed elsewhere) |
 | `core.providerMinStakeFloor` | 10,000 GNOT | 1,000 GNOT | guardian `SetParam` (within the ordinary bounds) |
 | Kourt v3: three epochs of stake history before an answer, 72 h before an undisputed settlement | | skipped | Kourt's own test clock (`EnableTestClock`, `AdvanceTestHeight`, `AdvanceTestClock`), which only the realm's deployer may arm, only before the court exists |
 
 Each change obeys the parameters' 50%-per-block rate limit, so the script
 halves its way down and prints the result beside the value it started from.
 
+The voting epoch is not in the table because the demo does not change it:
+`dao.epochBlocks` is fixed (720 blocks) and is 10 blocks on a chain whose
+id is `dev` from genesis, so member weight counts within a minute or two.
+
 The Kourt clock is armed only on a chain that has no court besides Kourt's
 own `meta` yet. On a chain where a court already exists (a chain-test ran
 before, say) the demo says so and the claim runs on Kourt's real clock: the
-bot cranks the mirror hourly, the answer follows about three hours of blocks
+demo bot cranks the mirror every 2 minutes (a production bot hourly), the
+answer follows about three hours of blocks
 and the settlement 72 hours later. `RESET=1` gives a clean chain.
 
 ## Reading the pages
@@ -67,8 +73,8 @@ and the settlement 72 hours later. `RESET=1` gives a clean chain.
 - **`core:feed/1`** shows the feed, its providers and the latest value;
   `core:feed/1/rounds` every round with who submitted what.
 - **`demo/reader`** is the example consumer realm: its path, its
-  subscription, and every reading with the block height and chain time it
-  was taken at. Its source is `gno.land/r/clockwork/gnoracle/demo/reader`;
+  subscription, and its newest 50 readings (the page and its `json` view),
+  each with the block height and chain time it was taken at. Its source is `gno.land/r/clockwork/gnoracle/demo/reader`;
   any realm reads the same way (`core.Read` through a crossing call, served
   because the realm is subscribed to the feed; nothing per read).
 - **`core:dispute/1`** shows the challenge, the ballot's tally once counted,

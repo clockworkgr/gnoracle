@@ -4,6 +4,7 @@
 package kourt_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,6 +246,62 @@ func TestMirrorRecordsKourtDissent(cur realm, t *testing.T) {
 	uassert.True(t, kourt.Float(cross(cur)) > 15_000_000)
 }
 
+// TestMirrorFollowsForeignAnswerBeforeStaking: a holder stakes and answers NO
+// before the mirror stakes; the mirror follows the claim without a position
+// and records the dissent once it settles.
+func TestMirrorFollowsForeignAnswerBeforeStaking(cur realm, t *testing.T) {
+	install(cur)
+	did := resolvedDispute(cur, "FOREIGN/USD")
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	uassert.Equal(t, kourt.StateFiled, kourt.Crank(cross(cur), did))
+	rec := kourt.GetRecord(did)
+	skip(3*3600 + 5)
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.Stake(cross(cur), kourt.CourtSlug, rec.ClaimID, 1, 2_000_000)
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.PostAnswer(cross(cur), kourt.CourtSlug, rec.ClaimID, 1)
+	before := kourt.Float(cross(cur))
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	uassert.Equal(t, kourt.StateAnswered, kourt.Crank(cross(cur), did))
+	uassert.Equal(t, int64(0), kourt.GetRecord(did).Stake)
+	skip(72*3600 + 5)
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	uassert.Equal(t, kourt.StateDissent, kourt.Crank(cross(cur), did))
+	rec = kourt.GetRecord(did)
+	uassert.Equal(t, 1, rec.Verdict)
+	uassert.Equal(t, "undisputed", rec.Route)
+	// no stake to withdraw; the deposit and fee came back to the author
+	uassert.Equal(t, before+1_100_000, kourt.Float(cross(cur)))
+}
+
+// TestAbandonRecordsNoDecision: an abandoned record reads as no verdict.
+func TestAbandonRecordsNoDecision(cur realm, t *testing.T) {
+	install(cur)
+	did := resolvedDispute(cur, "ABANDON/USD")
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	kourt.Crank(cross(cur), did)
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	uassert.AbortsContains(t, cur, "not the authority", func() { kourt.Abandon(cross(cur), did, "x") })
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	kourt.Abandon(cross(cur), did, "rebinding")
+	rec := kourt.GetRecord(did)
+	uassert.Equal(t, kourt.StateAbandoned, rec.State)
+	uassert.Equal(t, -1, rec.Verdict)
+	uassert.Equal(t, "rebinding", rec.Route)
+	uassert.True(t, rec.SettledAt > 0)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	uassert.AbortsContains(t, cur, "already closed", func() { kourt.Abandon(cross(cur), did, "again") })
+}
+
 func TestMirrorRefusesUnresolvedAndStrangers(cur realm, t *testing.T) {
 	install(cur)
 	testing.SetRealm(testing.NewUserRealm(watcher))
@@ -272,4 +329,24 @@ func TestJSONRecords(cur realm, t *testing.T) {
 	uassert.True(t, state != "")
 	court, _ := all.MustKey("court").GetString()
 	uassert.Equal(t, kourt.CourtSlug, court)
+	oneWay, _ := all.MustKey("oneWay").GetBool()
+	uassert.True(t, oneWay)
+}
+
+// TestRenderPagesAndDoesNotEchoPaths checks the index is paged newest first
+// and that an unknown path is not echoed into the page.
+func TestRenderPagesAndDoesNotEchoPaths(cur realm, t *testing.T) {
+	page := kourt.Render(cross(cur), "dispute/`](javascript:x)")
+	uassert.False(t, strings.Contains(page, "javascript"))
+	page = kourt.Render(cross(cur), "zzz<script>")
+	uassert.False(t, strings.Contains(page, "script"))
+	page = kourt.Render(cross(cur), "")
+	first := strings.Index(page, "](:dispute/")
+	uassert.True(t, first > 0)
+	uassert.Equal(t, page, kourt.Render(cross(cur), "page/1"))
+	// newest first: the highest dispute id with a record leads the index
+	newest := kourt.NewestRecords(0, 1)
+	uassert.Equal(t, 1, len(newest))
+	uassert.True(t, strings.Contains(page[first:first+40], "(:dispute/"+strconv.FormatUint(newest[0].Dispute, 10)+")"))
+	uassert.False(t, strings.Contains(kourt.Render(cross(cur), "page/2"), "](:dispute/"))
 }

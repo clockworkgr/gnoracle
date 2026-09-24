@@ -52,14 +52,21 @@ for name in ${EXTRA_KEYS:-}; do
   echo "$name ($addr): existing key, runs as an agent"
   KEYS+=("$name")
 done
-for n in $(seq 1 $((AGENTS - 1 - $(echo ${EXTRA_KEYS:-} | wc -w)))); do
-  name="soak$n"
+# ensure_key <name>: create a throwaway key in the dev keybase unless it exists
+ensure_key() {
   # capture first: with pipefail, grep -q closing the pipe early would make gnokey's SIGPIPE look like "not found"
+  local keys
   keys="$(gk list 2>/dev/null || true)"
-  if ! grep -q " $name " <<<"$keys"; then
-    printf '%s\n%s\n' "$GNOKEY_PASSWORD" "$GNOKEY_PASSWORD" | gk add -insecure-password-stdin "$name" >/dev/null
+  if ! grep -q " $1 " <<<"$keys"; then
+    printf '%s\n%s\n' "$GNOKEY_PASSWORD" "$GNOKEY_PASSWORD" | gk add -insecure-password-stdin "$1" >/dev/null
   fi
-  addr="$(gk list 2>/dev/null | grep -A1 " $name " | grep -oE 'g1[0-9a-z]{38}' | head -1)"
+}
+addr_of() { gk list 2>/dev/null | grep -A1 " $1 " | grep -oE 'g1[0-9a-z]{38}' | head -1; }
+nextra=$(echo ${EXTRA_KEYS:-} | wc -w)
+for ((n = 1; n <= AGENTS - 1 - nextra; n++)); do
+  name="soak$n"
+  ensure_key "$name"
+  addr="$(addr_of "$name")"
   if "${CLI[@]}" -raw providers "$FEED" | jq_ "import sys; sys.exit(0 if any(p['addr']=='$addr' and p['status']=='active' for p in d['providers']) else 1)"; then
     echo "$name ($addr): already an active provider"
     KEYS+=("$name"); continue
@@ -74,6 +81,12 @@ for n in $(seq 1 $((AGENTS - 1 - $(echo ${EXTRA_KEYS:-} | wc -w)))); do
   fi
 done
 echo "agents: ${KEYS[*]}"
+# the bot signs its cranks with a key of its own: sharing test1 with the test1
+# agent would race the two on the account sequence
+BOTKEY=soakbot
+ensure_key "$BOTKEY"
+KEY=test1 tx send -to "$(addr_of "$BOTKEY")" -send 100000000ugnot -gas-fee 2000ugnot -gas-wanted 2000000 >/dev/null 2>&1 || true
+echo "bot: $BOTKEY ($(addr_of "$BOTKEY")), funded with 100 GNOT for its cranks"
 [ "${#KEYS[@]}" -ge 2 ] || fail "need at least two agents; free a provider slot on feed $FEED"
 
 step "configs"
@@ -84,7 +97,7 @@ for name in "${KEYS[@]}"; do
   if [ $((i % 2)) -eq 1 ]; then
     src=$'adapter = "http"\nurls = ["http://127.0.0.1:'"$PRICE_PORT"$'/price.json"]\npath = "data.amount"'
   else
-    src=$'adapter = "exec"\ncommand = ["sh", "-c", "printf \'1.00%02d\\n\' $((RANDOM % 40))"]'
+    src=$'adapter = "exec"\ncommand = ["sh", "-c", "awk \'BEGIN { srand(); printf \\"1.00%02d\\\\n\\", int(rand() * 40) }\'"]'
   fi
   cat > "$OUT/$name.toml" <<CFG
 remote = "$REMOTE"
@@ -104,7 +117,7 @@ finalize_delay = "$((3 * i))s"
 $src
 CFG
 done
-sed -e "s#^remote.*#remote = \"$REMOTE\"#" -e "s#^chain_id.*#chain_id = \"$CHAINID\"#" -e "s#^key_home.*#key_home = \"$GNOKEY_HOME\"#" -e "s#^state.*#state = \"$OUT/bot-state.json\"#" configs/bot.dev.toml > "$OUT/bot.toml"
+sed -e "s#^remote.*#remote = \"$REMOTE\"#" -e "s#^chain_id.*#chain_id = \"$CHAINID\"#" -e "s#^key_home.*#key_home = \"$GNOKEY_HOME\"#" -e "s#^key .*#key      = \"$BOTKEY\"#" -e "s#^state.*#state = \"$OUT/bot-state.json\"#" configs/bot.dev.toml > "$OUT/bot.toml"
 
 step "running ${#KEYS[@]} agents and the bot for ${DURATION}s"
 if lsof -nP -iTCP:"$PRICE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -153,10 +166,10 @@ for name in "${KEYS[@]}"; do
 done
 # conservation
 "${CLI[@]}" -raw health > "$OUT/health.json" 2>/dev/null || true
-if ! head -1 "$OUT/health.json" | jq_ 'import sys, json; sys.exit(0 if json.loads(d["health"])["status"]=="ok" else 1)'; then
+if ! head -1 "$OUT/health.json" | jq_ 'import sys, json; sys.exit(0 if (lambda h: (json.loads(h) if isinstance(h, str) else h))(d["health"])["status"]=="ok" else 1)'; then
   echo "x core health is not ok"; ok=0
 else echo "- core health ok"; fi
-if ! sed -n 2p "$OUT/health.json" | jq_ 'import sys, json; sys.exit(0 if json.loads(d["health"])["status"]=="ok" else 1)'; then
+if ! sed -n 2p "$OUT/health.json" | jq_ 'import sys, json; sys.exit(0 if (lambda h: (json.loads(h) if isinstance(h, str) else h))(d["health"])["status"]=="ok" else 1)'; then
   echo "x dao health is not ok"; ok=0
 else echo "- dao health ok"; fi
 # the bot announced finalisations

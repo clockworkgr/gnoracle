@@ -451,3 +451,115 @@ func feedValue(cur realm, feed uint64) int64 {
 	v, _ := node.MustKey("value").GetNumeric()
 	return int64(v)
 }
+
+// settleAll runs SettleMember for each member until nothing processable is
+// left.
+func settleAll(cur realm, who ...address) {
+	for _, m := range who {
+		for k := 0; k < 20; k++ {
+			testing.SetRealm(testing.NewUserRealm(stranger))
+			nosend()
+			if dao.SettleMember(cross(cur), m, 0) == 0 {
+				break
+			}
+		}
+	}
+}
+
+// TestAppealedRoundOneSettlesAndHoldsWithdrawals: an appealed round-1
+// decision is superseded by round 2. It settles like a roll (no rewards, no
+// incoherence) and is final at once, so members' settlement never stalls on
+// it; and a decided ballot the core has not applied yet still holds unbonded
+// stake.
+func TestAppealedRoundOneSettlesAndHoldsWithdrawals(cur realm, t *testing.T) {
+	install(cur)
+	settleAll(cur, alice, bob, carol)
+	ensureStake(cur, alice, 985_000*pyth)
+	ensureStake(cur, bob, 300_000*pyth)
+	ensureStake(cur, carol, 200_000*pyth)
+	for _, who := range []address{alice, bob, carol} {
+		uassert.Equal(t, dao.BallotCount(), dao.GetMember(who).Cursor)
+	}
+	// bob starts unbonding part of his stake; the cooldown passes before the dispute
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	dao.RequestUnstake(cross(cur), 1_000*pyth)
+	skip(7*day + 5)
+	epoch()
+
+	id := newFeed(cur, "SETTLE/USD")
+	round := runRound(cur, id, 2_000_000, 2_001_000, 2_002_000)
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	payCore(2_500 * gnot)
+	did := core.Dispute(cross(cur), id, round, 2_100_000, "minor", "off by five percent")
+	seq1 := dao.BallotOf(did)
+	commitReveal(cur, did, 1, map[address]string{alice: "OVERTURN", bob: "UPHOLD", carol: "UPHOLD"})
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	core.ResolveDispute(cross(cur), did)
+	uassert.Equal(t, "UPHOLD", core.GetDispute(did).Outcome)
+	b1 := dao.GetBallot(seq1)
+	uassert.Equal(t, dao.BallotResolved, b1.Phase)
+	uassert.False(t, b1.Final)
+	uassert.True(t, b1.CoherentWeight > 0)
+
+	// decided but not applied: the unbonded stake is still obligated
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	uassert.AbortsContains(t, cur, "still obligates", func() { dao.Withdraw(cross(cur)) })
+
+	// the appeal supersedes round 1
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	payCore(5_000 * gnot)
+	core.Appeal(cross(cur), did)
+	b1 = dao.GetBallot(seq1)
+	uassert.True(t, b1.Appealed)
+	uassert.True(t, b1.Final)
+	uassert.Equal(t, int64(0), b1.CoherentWeight)
+	seq2 := dao.BallotOf(did)
+	uassert.Equal(t, seq1, dao.GetBallot(seq2).PrevSeq)
+	// round 2 obligates the unbonded stake in turn
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	uassert.AbortsContains(t, cur, "still obligates", func() { dao.Withdraw(cross(cur)) })
+
+	votes := map[address]string{alice: "OVERTURN", bob: "OVERTURN", carol: "OVERTURN"}
+	for who, choice := range votes {
+		testing.SetRealm(testing.NewUserRealm(who))
+		nosend()
+		dao.CommitVote(cross(cur), did, tally.Commitment(did, 2, choice, "y", who))
+	}
+	skip(dao.Param("commitPeriod2") + 5)
+	for who, choice := range votes {
+		testing.SetRealm(testing.NewUserRealm(who))
+		nosend()
+		dao.RevealVote(cross(cur), did, choice, "y")
+	}
+	skip(dao.Param("revealPeriod2") + 5)
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	core.ResolveDispute(cross(cur), did)
+	uassert.Equal(t, core.DisputeResolved, core.GetDispute(did).Status)
+	uassert.Equal(t, "OVERTURN", core.GetDispute(did).Outcome)
+	uassert.True(t, dao.GetBallot(seq2).Final)
+
+	// every member settles both rounds: round 1 charged nobody who revealed
+	// (alice, incoherent there, pays nothing) and paid nobody; round 2 pays
+	// the coherent voters their share of the bond
+	alicePen := dao.GetMember(alice).TotalPenalised
+	bobPyth, bobUgnot := dao.GetMember(bob).PendingPyth, dao.GetMember(bob).PendingUgnot
+	settleAll(cur, alice, bob, carol)
+	for _, who := range []address{alice, bob, carol} {
+		uassert.Equal(t, dao.BallotCount(), dao.GetMember(who).Cursor)
+	}
+	uassert.Equal(t, alicePen, dao.GetMember(alice).TotalPenalised)
+	uassert.Equal(t, bobPyth, dao.GetMember(bob).PendingPyth) // full turnout: no penalty pool
+	uassert.True(t, dao.GetMember(bob).PendingUgnot > bobUgnot)
+
+	// nothing obligates bob's unbonded stake any more
+	testing.SetRealm(testing.NewUserRealm(bob))
+	nosend()
+	uassert.Equal(t, int64(1_000*pyth), dao.Withdraw(cross(cur)))
+	health(t)
+	uassert.True(t, strings.Contains(core.Health(), `"status":"ok"`))
+}

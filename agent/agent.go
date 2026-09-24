@@ -220,7 +220,7 @@ func (r *feedRunner) tick(ctx context.Context) error {
 			if fs.StartAt != 0 {
 				r.log.Printf("schedule changed (start %d -> %d); forgetting remembered rounds", fs.StartAt, f.StartAt)
 			}
-			fs.StartAt, fs.HasRound, fs.LastRound, fs.HasValue, fs.LastValue = f.StartAt, false, 0, false, 0
+			fs.StartAt, fs.HasRound, fs.LastRound, fs.HasValue, fs.LastValue, fs.ValueRound = f.StartAt, false, 0, false, 0, 0
 		}
 	})
 	st := r.a.state.Snapshot(r.fc.ID)
@@ -397,16 +397,9 @@ func (r *feedRunner) submit(ctx context.Context, f *gnochain.FeedInfo, round uin
 	}
 	r.a.journal.Write(Entry{Feed: r.fc.ID, Round: round, Kind: "fetch", Value: &value, Samples: samples})
 
-	// sanity against our last submission, else the delayed public aggregate
+	// sanity against the latest of the public value and our last submission
 	if f.Spec.IsNumeric() && r.p.sanityBps > 0 {
-		ref, have := int64(0), false
-		switch {
-		case st.HasValue:
-			ref, have = st.LastValue, true
-		case f.Value != nil:
-			ref, have = *f.Value, true
-		}
-		if have && !WithinBps(value, ref, r.p.sanityBps) {
+		if ref, have := sanityRef(*st, f); have && !WithinBps(value, ref, r.p.sanityBps) {
 			msg := fmt.Sprintf("%s deviates more than %d bps from the reference %s", FormatScaled(value, f.Spec.Decimals), r.p.sanityBps, FormatScaled(ref, f.Spec.Decimals))
 			if !r.fc.Override {
 				return r.refuse(ctx, f, round, samples, msg)
@@ -429,12 +422,27 @@ func (r *feedRunner) submit(ctx context.Context, f *gnochain.FeedInfo, round uin
 		return fmt.Errorf("submit: %w", err)
 	}
 	r.a.state.Update(r.fc.ID, func(fs *FeedState) {
-		fs.HasRound, fs.LastRound, fs.HasValue, fs.LastValue, fs.LastTxHash = true, round, true, value, res.Hash
+		fs.HasRound, fs.LastRound, fs.HasValue, fs.LastValue, fs.ValueRound, fs.LastTxHash = true, round, true, value, round, res.Hash
 	})
 	_ = r.a.state.Save()
 	r.log.Printf("round %d: submitted %s (tx %s, gas %d, fee %s)", round, FormatScaled(value, f.Spec.Decimals), res.Hash, res.GasUsed, res.Fee)
 	r.a.journal.Write(Entry{Feed: r.fc.ID, Round: round, Kind: "submit", Value: &value, Tx: res.Hash, GasUsed: res.GasUsed, Fee: res.Fee})
 	return nil
+}
+
+// sanityRef is the reference a fresh value is checked against: the latest
+// public value, unless the agent's own last submission is to a later round
+// than the one that value comes from (the public value lags a round or more
+// behind the submissions). An own value of unknown round (a state written
+// before ValueRound was kept) yields to the public one.
+func sanityRef(st FeedState, f *gnochain.FeedInfo) (int64, bool) {
+	switch {
+	case f.Value != nil && (!st.HasValue || f.LastRound >= st.ValueRound):
+		return *f.Value, true
+	case st.HasValue:
+		return st.LastValue, true
+	}
+	return 0, false
 }
 
 func (r *feedRunner) refuse(ctx context.Context, f *gnochain.FeedInfo, round uint64, samples []Sample, why string) error {

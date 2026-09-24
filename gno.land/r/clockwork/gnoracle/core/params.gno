@@ -13,8 +13,8 @@ var registry = params.New()
 
 // devChain is true on a development chain (chain id "dev": gnodev and the
 // test harness), where waiting a day for a window is not an option. It
-// relaxes only the floors of a few timing parameters; the defaults, and
-// every bound on any other chain, are what the plan says.
+// relaxes only the floor of appealWindow; the defaults, and every bound on
+// any other chain, are what the plan says.
 var devChain = runtime.ChainID() == "dev"
 
 func devFloor(prod, dev int64) int64 {
@@ -41,7 +41,7 @@ func defineParams() {
 	def("roundRetention", "seconds after finality before a round may be pruned", 30*24*3600, 7*24*3600, 365*24*3600, 5000)
 	def("minRoundsKept", "rounds always kept per feed regardless of age", 64, 8, 10_000, 5000)
 	def("retentionAfterDeprecate", "seconds after deprecation before a feed may be pruned", 90*24*3600, 30*24*3600, 730*24*3600, 5000)
-	def("deadFeedRounds", "consecutive empty rounds after which a feed is deprecated on prune", 168, 24, 10_000, 5000)
+	def("deadFeedRounds", "consecutive empty rounds after which a recurring feed is deprecated at finalisation", 168, 24, 10_000, 5000)
 	def("maxIncentivePay", "largest fee-pool payment a release may make per call (tips, bounties)", 10*gnot, 0, 1000*gnot, 5000)
 	def("trustedOneOffCap", "largest declared value at stake a trusted requester may self-activate", 50_000*gnot, 0, 10_000_000*gnot, 5000)
 	// providers
@@ -60,8 +60,8 @@ func defineParams() {
 	def("unbondPeriod", "seconds between RequestUnbond and Withdraw", 14*24*3600, 7*24*3600, 60*24*3600, 5000)
 	def("crankTipBps", "share of a round pool paid to whoever finalises it", 100, 0, 1000, 5000)
 	// fees
+	// the rest goes to the DAO, which gives stakers its stakerFeeShareBps of it
 	def("feeSplitProvidersBps", "share of subscription payments (feed funding and realm subscriptions) to the feed pool", 7000, 0, 10_000, 5000)
-	def("feeSplitStakersBps", "share of subscription payments to DAO stakers", 1500, 0, 5000, 5000)
 	// disputes
 	def("minDisputeBond", "smallest dispute bond", 2500*gnot, 100*gnot, 100_000*gnot, 5000)
 	def("disputeBondBps", "dispute bond as a share of the feed's active stake", 1000, 100, 10_000, 5000)
@@ -81,6 +81,17 @@ func Param(name string) int64 { return registry.Int(name) }
 
 // ParamStr returns a string parameter.
 func ParamStr(name string) string { return registry.Str(name) }
+
+// CheckParam reports the error SetParam would give for name=value (unknown
+// name, a string parameter, out of bounds, more than its change limit)
+// without changing anything, so a proposal can be refused when it is made
+// rather than when it executes. The once-per-height limit is not checked:
+// it depends on the height of execution.
+func CheckParam(name string, value int64) error { return registry.Check(name, value) }
+
+// CheckParamStr reports the error SetParamStr would give, without changing
+// anything.
+func CheckParamStr(name, value string) error { return registry.CheckString(name, value) }
 
 // ParamsJSON renders every parameter.
 func ParamsJSON() string { return registry.JSON() }

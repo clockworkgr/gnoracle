@@ -334,8 +334,12 @@ Findings that changed the plan's defaults:
   chains and were then zeroed; Tellor tips total 44 TRB lifetime; UMA cut
   emissions from 0.18 to 0.130 UMA/s. What pays is subscriptions (Pyth Pro
   about $676K gross in August 2026; Chainlink Data Streams) and sponsor-funded
-  feeds. The plan makes a monthly feed subscription the primary revenue and
-  keeps metered reads as secondary.
+  feeds. The plan makes a monthly feed subscription the primary revenue.
+  (It first kept metered reads as a secondary source; on 2026-09-24 they
+  were replaced by per-period realm subscriptions, because a value a realm
+  stores cannot be kept from free readers: a subscribed realm now reads
+  free per call and pays by the month, and sponsored feeds serve every
+  realm.)
 - **Optimistic windows are short when bots watch and long when humans do.**
   UMA/Polymarket 2 h with whitelisted proposer bots; Tellor 12 h; Chainlink's
   only slashable condition is 3 h of downtime. The plan starts at 12 h for

@@ -343,6 +343,153 @@ func TestMirrorRecordsKourtConfirmation(cur realm, t *testing.T) {
 	uassert.Equal(t, 0, rec.Verdict)
 }
 
+// fund tops the float up from the holder's coin.
+func fund(cur realm, n int64) {
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.TransferCC(cross(cur), slug, kAddr(), n)
+}
+
+// TestMirrorFollowsForeignAnswerBeforeStaking: a holder stakes and answers NO
+// before the mirror stakes, which freezes staking; the mirror follows the
+// claim without a position and records the dissent.
+func TestMirrorFollowsForeignAnswerBeforeStaking(cur realm, t *testing.T) {
+	install(cur)
+	fund(cur, 10*cc)
+	did := resolvedDispute(cur, "FOREIGN/USD")
+	uassert.Equal(t, kourt.StateFiled, crank(cur, did))
+	rec := kourt.GetRecord(did)
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.Stake(cross(cur), slug, rec.ClaimID, 1, 2*cc)
+	advance(2*epochBlocks + 10)
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.Stake(cross(cur), slug, rec.ClaimID, 1, 1) // seals the stake history
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.PostAnswer(cross(cur), slug, rec.ClaimID, 1)
+	uassert.True(t, kv.HasAnswer(slug, rec.ClaimID))
+
+	// the mirror cannot stake any more; it records the answer instead of
+	// wedging on Kourt's "staking is frozen"
+	uassert.Equal(t, kourt.StateAnswered, crank(cur, did))
+	rec = kourt.GetRecord(did)
+	uassert.Equal(t, int64(0), rec.Stake)
+	uassert.Equal(t, int64(0), kv.StakeOf(slug, rec.ClaimID, 0, kAddr()))
+	uassert.True(t, rec.AnsweredAt > 0 && rec.AnsweredAt <= testing.GetContext().Time.Unix())
+	uassert.Equal(t, kourt.StateAnswered, crank(cur, did))
+	skip(72*3600 + 10)
+	uassert.Equal(t, kourt.StateDissent, crank(cur, did))
+	rec = kourt.GetRecord(did)
+	uassert.Equal(t, 1, rec.Verdict)
+	uassert.Equal(t, "undisputed", rec.Route)
+	uassert.True(t, kv.RewardsOpened(slug, rec.ClaimID))
+	// the draw pays the author slice; the mirror holds no winning position,
+	// so reclaim skips the winner slice rather than failing on it
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	out := kourt.Invoke(cross(cur), "reclaim", u(did))
+	node, err := json.Unmarshal([]byte(out))
+	uassert.NoError(t, err)
+	w, _ := node.MustKey("winner").GetNumeric()
+	uassert.Equal(t, float64(0), w)
+}
+
+// TestWithdrawRecoversAbandonedRecords: the authority abandons a staked
+// record and an answered one; `withdraw` unstakes the first and, once the
+// second settles, withdraws its stake and opens its draw.
+func TestWithdrawRecoversAbandonedRecords(cur realm, t *testing.T) {
+	install(cur)
+	fund(cur, 10*cc)
+	staked := resolvedDispute(cur, "ABANDON1/USD")
+	uassert.Equal(t, kourt.StateFiled, crank(cur, staked))
+	uassert.Equal(t, kourt.StateStaked, crank(cur, staked))
+	answeredID := resolvedDispute(cur, "ABANDON2/USD")
+	ans := answered(cur, t, answeredID)
+
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	uassert.AbortsContains(t, cur, "serves abandoned records", func() { kourt.Invoke(cross(cur), "withdraw", u(staked)) })
+	uassert.AbortsContains(t, cur, "usage: withdraw", func() { kourt.Invoke(cross(cur), "withdraw", "x") })
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	kourt.Abandon(cross(cur), staked, "test")
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	kourt.Abandon(cross(cur), answeredID, "test")
+	rec := kourt.GetRecord(staked)
+	uassert.Equal(t, kourt.StateAbandoned, rec.State)
+	uassert.Equal(t, -1, rec.Verdict)
+	uassert.True(t, rec.SettledAt > 0)
+	uassert.Equal(t, kourt.StateAbandoned, crank(cur, staked)) // nothing more to crank
+
+	// no answer: the stake is unstaked into the float
+	before := kourt.Float(cross(cur))
+	stake := kv.StakeOf(slug, rec.ClaimID, 0, kAddr())
+	uassert.True(t, stake > 0)
+	spend0 := kv.SpendableOf(slug, kAddr())
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	node, err := json.Unmarshal([]byte(kourt.Invoke(cross(cur), "withdraw", u(staked))))
+	uassert.NoError(t, err)
+	n, _ := node.MustKey("unstaked").GetNumeric()
+	uassert.Equal(t, float64(stake), n)
+	uassert.Equal(t, int64(0), kv.StakeOf(slug, rec.ClaimID, 0, kAddr()))
+	uassert.Equal(t, before, kourt.Float(cross(cur))) // staked coin already counted in the float
+	uassert.Equal(t, spend0+stake, kv.SpendableOf(slug, kAddr()))
+
+	// answered: nothing moves until the claim settles, then the stake and
+	// the author's deposit, fee and bond come back
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	node, _ = json.Unmarshal([]byte(kourt.Invoke(cross(cur), "withdraw", u(answeredID))))
+	n, _ = node.MustKey("withdrawn").GetNumeric()
+	uassert.Equal(t, float64(0), n)
+	skip(72*3600 + 10)
+	testing.SetRealm(testing.NewUserRealm(holder))
+	nosend()
+	kv.SettleUndisputed(cross(cur), slug, ans.ClaimID)
+	spendBefore := kv.SpendableOf(slug, kAddr())
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	node, _ = json.Unmarshal([]byte(kourt.Invoke(cross(cur), "withdraw", u(answeredID))))
+	n, _ = node.MustKey("withdrawn").GetNumeric()
+	uassert.True(t, n > 0)
+	opened, _ := node.MustKey("opened").GetBool()
+	uassert.True(t, opened)
+	uassert.True(t, kv.RewardsOpened(slug, ans.ClaimID))
+	uassert.True(t, kv.SpendableOf(slug, kAddr()) > spendBefore)
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	nosend()
+	node, _ = json.Unmarshal([]byte(kourt.Invoke(cross(cur), "withdraw", u(answeredID))))
+	opened, _ = node.MustKey("opened").GetBool()
+	uassert.False(t, opened) // idempotent
+}
+
+// TestMirrorClosesDeadClaim: a claim nobody answers for twelve weeks can no
+// longer be answered; the mirror closes it on Kourt, takes the stake back
+// and abandons the record instead of failing on every crank.
+func TestMirrorClosesDeadClaim(cur realm, t *testing.T) {
+	install(cur)
+	fund(cur, 10*cc)
+	did := resolvedDispute(cur, "DEAD/USD")
+	floatBefore := kourt.Float(cross(cur))
+	uassert.Equal(t, kourt.StateFiled, crank(cur, did))
+	uassert.Equal(t, kourt.StateStaked, crank(cur, did))
+	rec := kourt.GetRecord(did)
+	advance(12*7*86400/5 + 10)
+	uassert.Equal(t, kourt.StateAbandoned, crank(cur, did))
+	rec = kourt.GetRecord(did)
+	uassert.Equal(t, "dead", rec.Route)
+	uassert.Equal(t, -1, rec.Verdict)
+	uassert.True(t, kv.ClaimClosed(slug, rec.ClaimID))
+	uassert.Equal(t, int64(0), kv.StakeOf(slug, rec.ClaimID, 0, kAddr()))
+	// the stake and the deposit came back; Kourt burns a dead claim's fee
+	uassert.Equal(t, floatBefore-100_000, kourt.Float(cross(cur)))
+	uassert.Equal(t, kourt.StateAbandoned, crank(cur, did))
+}
+
 func TestMirrorRefusesStrangersAndRedeemsForTreasury(cur realm, t *testing.T) {
 	install(cur)
 	testing.SetRealm(testing.NewUserRealm(watcher))
@@ -391,6 +538,18 @@ func TestJSONRecords(cur realm, t *testing.T) {
 	uassert.True(t, exists)
 	addr, _ := all.MustKey("address").GetString()
 	uassert.Equal(t, string(kAddr()), addr)
+	oneWay, _ := all.MustKey("oneWay").GetBool()
+	uassert.False(t, oneWay)
+
+	// the index is paged newest first; unknown paths are not echoed
+	page := kourt.Render(cross(cur), "")
+	uassert.True(t, strings.Contains(page, "two-way court"))
+	uassert.Equal(t, page, kourt.Render(cross(cur), "page/1"))
+	uassert.False(t, strings.Contains(kourt.Render(cross(cur), "zz`<b>evil</b>"), "evil"))
+	uassert.False(t, strings.Contains(kourt.Render(cross(cur), "dispute/`evil"), "evil"))
+	first := strings.Index(page, "](:dispute/")
+	newest := kourt.NewestRecords(0, 1)
+	uassert.True(t, strings.Contains(page[first:first+40], "(:dispute/"+u(newest[0].Dispute)+")"))
 }
 
 func u(v uint64) string {

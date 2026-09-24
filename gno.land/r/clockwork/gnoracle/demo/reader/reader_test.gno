@@ -140,4 +140,26 @@ func TestReaderRecordsWhatItIsServed(cur realm, t *testing.T) {
 	recs, _ := node.MustKey("readings").GetArray()
 	h, _ := recs[0].MustKey("height").GetNumeric()
 	uassert.Equal(t, float64(last.Height), h)
+
+	// the page and the machine view list the newest 50 readings only; the
+	// count is of every reading kept
+	for i := 0; i < 55; i++ {
+		testing.SetRealm(testing.NewUserRealm(watcher))
+		nosend()
+		reader.Poll(cross(cur), id)
+	}
+	uassert.Equal(t, 57, reader.Count())
+	uassert.Equal(t, int64(57), reader.Last().Seq)
+	page = reader.Render("")
+	uassert.True(t, strings.Contains(page, "The newest 50 of 57 readings"))
+	uassert.True(t, strings.Contains(page, "\n| 57 | "))
+	uassert.True(t, strings.Contains(page, "\n| 8 | "))
+	uassert.False(t, strings.Contains(page, "\n| 7 | "))
+	node, _ = json.Unmarshal([]byte(reader.Render("json")))
+	n, _ = node.MustKey("count").GetNumeric()
+	uassert.Equal(t, float64(57), n)
+	recs, _ = node.MustKey("readings").GetArray()
+	uassert.Equal(t, 50, len(recs))
+	s, _ := recs[0].MustKey("seq").GetNumeric()
+	uassert.Equal(t, float64(57), s)
 }

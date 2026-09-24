@@ -133,7 +133,7 @@ func renderJSON(parts []string) string {
 	case "params":
 		return dao.ParamsJSON()
 	case "health":
-		return jsonNow().Str("health", dao.Health()).String()
+		return jsonNow().Raw("health", dao.Health()).String()
 	}
 	return jsonw.Error("unknown json path")
 }
@@ -176,7 +176,7 @@ func jsonBallot(seq uint64, b *dao.Ballot) *jsonw.Object {
 		Int("commitEnds", b.CommitEnds).Int("revealEnds", b.RevealEnds).Int("uphold", b.Uphold).Int("overturn", b.Overturn).
 		Int("overturnMinor", b.OverturnMinor).Int("void", b.Void).Int("abstain", b.Abstain).Int("revealed", b.Revealed).
 		Str("outcome", b.Outcome).Str("tier", b.Tier).Int("coherentWeight", b.CoherentWeight).Int("expectedPool", b.ExpectedPool).
-		Int("bondShareUgnot", b.BondShareUgnot).Int("clippedAway", b.ClippedAway).Int("resolvedAt", b.ResolvedAt).Uint("prevSeq", b.PrevSeq).Bool("final", b.Final)
+		Int("bondShareUgnot", b.BondShareUgnot).Int("clippedAway", b.ClippedAway).Int("resolvedAt", b.ResolvedAt).Uint("prevSeq", b.PrevSeq).Bool("final", b.Final).Bool("appealed", b.Appealed)
 }
 
 func jsonProposal(p *dao.Proposal) *jsonw.Object {

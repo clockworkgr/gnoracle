@@ -128,7 +128,10 @@ func TestReleaseHooks(cur realm, t *testing.T) {
 	core.Invoke(cross(cur), "note", "7 source ")
 	uassert.Equal(t, "", core.Note("v2", "7", "source")) // empty value removes
 
-	// a governed parameter added by a release, then tuned by the authority
+	// a governed parameter added by a release (authority only), then tuned
+	uassert.AbortsContains(t, cur, "reserved to the core authority", func() { core.Invoke(cross(cur), "define", "v2Knob 40") })
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
 	uassert.Equal(t, "40", core.Invoke(cross(cur), "define", "v2Knob 40"))
 	uassert.Equal(t, int64(40), core.Param("v2Knob"))
 	testing.SetRealm(testing.NewUserRealm(admin))
@@ -136,10 +139,13 @@ func TestReleaseHooks(cur realm, t *testing.T) {
 	core.SetParam(cross(cur), "v2Knob", 60)
 	uassert.Equal(t, int64(60), core.Param("v2Knob"))
 
-	// a bounded incentive from the fee pool
+	// a bounded incentive from the fee pool, paid only at the authority's call
 	_, _, _, _, _, _, fees, _ := core.Held()
 	uassert.True(t, fees > 0)
 	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
+	uassert.AbortsContains(t, cur, "reserved to the core authority", func() { core.Invoke(cross(cur), "tip", "1000") })
+	testing.SetRealm(testing.NewUserRealm(admin))
 	nosend()
 	uassert.AbortsContains(t, cur, "maxIncentivePay", func() { core.Invoke(cross(cur), "tip", "999999999999") })
 	uassert.Equal(t, "paid", core.Invoke(cross(cur), "tip", "1000"))

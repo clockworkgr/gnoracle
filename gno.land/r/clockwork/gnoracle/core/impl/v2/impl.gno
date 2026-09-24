@@ -31,11 +31,14 @@ func (v *implV2) Render(_ int, rlm realm, path string) string {
 //
 //	echo <text>                 returns the text
 //	note <id> <key> <value>     stores release data on object kind "v2"
-//	define <name> <default>     adds a governed parameter
-//	tip <amount>                pays the caller an incentive from the fee pool
+//	define <name> <default>     adds a governed parameter (authority only)
+//	tip <amount>                pays the caller an incentive from the fee pool (authority only)
 func (v *implV2) Invoke(_ int, rlm realm, caller address, userCall bool, sent int64, method, args string) string {
 	st := core.Store(0, rlm)
 	f := strings.Fields(args)
+	if (method == "define" || method == "tip") && !core.IsAuthority(caller) {
+		panic("v2: " + method + " is reserved to the core authority")
+	}
 	switch method {
 	case "echo":
 		return args

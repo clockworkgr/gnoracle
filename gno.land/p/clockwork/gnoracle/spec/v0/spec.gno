@@ -46,7 +46,9 @@ const (
 	// bounded by its interval); without it CloseAt could overflow.
 	MaxSubmitWindowOneOff = int64(30 * 24 * 3600)
 	// MaxAmount bounds every ugnot amount in a spec (1e15 ugnot, one billion
-	// GNOT) so basis-point arithmetic on it cannot overflow int64.
+	// GNOT) so products with small counts stay in int64 (12 periods of a
+	// price, for instance). A basis-point product (up to 1e15 x 10000) does
+	// not fit: the realms compute a*bps/10000 as a/10000*bps + a%10000*bps/10000.
 	MaxAmount        = int64(1_000_000_000_000_000)
 	MinResolveLead   = int64(3600)
 	MaxResolveLead   = int64(2 * 365 * 24 * 3600)
@@ -57,8 +59,8 @@ const (
 	MaxTagLen        = 32
 )
 
-// Limits are the DAO-level floors the spec must clear; they live in the DAO's
-// parameter registry and are handed in at parse time.
+// Limits are the governed floors the spec must clear; they live in the core
+// realm's parameter registry and are handed in at parse time.
 type Limits struct {
 	ProviderMinStakeFloor int64 // base units of the stake denom
 	SubscriberFloor       int64 // per period, what a realm pays to read a recurring feed
@@ -142,7 +144,12 @@ func Parse(text string, now int64, lim Limits) (*Spec, error) {
 	if !root.IsObject() {
 		return nil, errors.New("spec: top level must be an object")
 	}
-	if dup := duplicateKey(text); dup != "" {
+	dup, escaped := duplicateKey(text)
+	if escaped {
+		// "name" would decode to name and slip past the duplicate check
+		return nil, errors.New("spec: escaped characters are not allowed in field names")
+	}
+	if dup != "" {
 		return nil, errors.New("spec: field " + strconv.Quote(dup) + " appears twice")
 	}
 	p := &parser{root: root}
@@ -422,11 +429,13 @@ func (p *parser) strs(key string, maxItems, maxLen int) []string {
 
 // duplicateKey returns the first top-level key that appears twice in text,
 // or "". The JSON parser keeps the last value silently, which would let a
-// spec show voters one value and store another.
-func duplicateKey(text string) string {
+// spec show voters one value and store another. Keys are compared as
+// written, so a key with an escape sequence could spell a known key
+// differently: escaped reports such a key, and the caller refuses it.
+func duplicateKey(text string) (dup string, escaped bool) {
 	seen := map[string]bool{}
 	depth, start := 0, 0
-	inStr, esc, expectKey := false, false, false
+	inStr, esc, expectKey, keyEsc := false, false, false, false
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		if inStr {
@@ -436,6 +445,7 @@ func duplicateKey(text string) string {
 			}
 			if c == '\\' {
 				esc = true
+				keyEsc = true
 				continue
 			}
 			if c == '"' {
@@ -446,9 +456,12 @@ func duplicateKey(text string) string {
 						j++
 					}
 					if j < len(text) && text[j] == ':' {
+						if keyEsc {
+							return "", true
+						}
 						key := text[start:i]
 						if seen[key] {
-							return key
+							return key, false
 						}
 						seen[key] = true
 						expectKey = false
@@ -459,7 +472,7 @@ func duplicateKey(text string) string {
 		}
 		switch c {
 		case '"':
-			inStr, start = true, i+1
+			inStr, start, keyEsc = true, i+1, false
 		case '{', '[':
 			depth++
 			if depth == 1 && c == '{' {
@@ -473,5 +486,5 @@ func duplicateKey(text string) string {
 			}
 		}
 	}
-	return ""
+	return "", false
 }

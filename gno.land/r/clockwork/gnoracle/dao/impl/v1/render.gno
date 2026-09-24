@@ -93,6 +93,7 @@ func renderMembers() string {
 }
 
 func esc(s string) string {
-	r := strings.NewReplacer("|", "\\|", "<", "&lt;", ">", "&gt;", "[", "\\[", "]", "\\]", "\n", " ")
+	// the backslash first, so the escapes added below stay escapes
+	r := strings.NewReplacer("\\", "\\\\", "|", "\\|", "<", "&lt;", ">", "&gt;", "[", "\\[", "]", "\\]", "\r", " ", "\n", " ")
 	return r.Replace(s)
 }

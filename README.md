@@ -4,9 +4,10 @@ Gnoracle is an oracle for [gno.land](https://gno.land): a service that puts
 real-world facts on the chain so that smart contracts can use them. A price
 every hour, the result of a match, the outcome of an election: anyone can ask
 for such a value, a community of staked providers delivers it round after
-round, contracts read it for a fee, and every disagreement is settled by a
-vote whose verdict is recorded in a court of record. It runs as a DAO, owned
-by the holders of its token, Pythia (PYTH).
+round, contracts read it free per call under a monthly subscription, and
+every disagreement is settled by a vote whose verdict is recorded in a court
+of record. It runs as a DAO, owned by the holders of its token, Pythia
+(PYTH).
 
 This page describes what the project does and how the pieces fit. The
 guides in `docs/guides/` say what to do as a provider, consumer, sponsor,
@@ -18,8 +19,9 @@ reasons behind every number.
 
 1. **Someone requests a feed.** They write a short specification: what the
    value is, how often it is needed (or the one moment it resolves), where
-   providers must get it from, how many providers it needs, what a read
-   costs. They post a small deposit.
+   providers must get it from, how many providers it needs, what a realm
+   pays per month to use it (nothing if the feed is sponsored). They post a
+   small deposit.
 2. **The DAO accepts it.** Token holders vote. Allow-listed applications (the
    first is gnomarket, a prediction market) can activate small one-off
    requests themselves, up to a cap.
@@ -51,7 +53,7 @@ reasons behind every number.
 | **Provider** | runs an agent that submits a value every round | stake of at least 10,000 GNOT per feed, plus gas of roughly 0.02 GNOT per submission | an equal share of every round's pool they took part in, plus a 1% tip for whoever finalises a round | 0.5% of stake per missed round, jail after three misses, 5% of stake for a wrong value, all of it for a fabricated one |
 | **Consumer** | a contract that reads values | a monthly subscription per feed, priced by the feed above a DAO floor; nothing per read; nothing at all on sponsored feeds and one-off outcomes | the value, with a quality tier, inside its own transactions | nothing beyond the subscription |
 | **Sponsor** | keeps a feed funded | the feed's monthly subscription (typically around 1,000 GNOT) | the feed keeps its providers and everyone who depends on it | nothing |
-| **Disputer** | challenges a round | a bond of at least 2,500 GNOT (10% of the feed's stake if larger, doubling for repeat disputes) | the bond back plus half of the slash when right | the bond when wrong |
+| **Disputer** | challenges a round | a bond of at least 2,500 GNOT (10% of the feed's stake if larger, doubling for repeat disputes, at most 16 times) | the bond back plus half of the slash when right | the bond when wrong |
 | **DAO member** | stakes PYTH, votes on requests and parameters, must vote on every dispute | nothing to join beyond the tokens | 15% of all subscription payments, plus a share of forfeited bonds and slashes | 0.5% of stake per ballot missed or voted against the outcome, capped at 5% a month |
 
 Of every subscription payment, 70% goes to the providers of that feed,
@@ -65,20 +67,30 @@ window; the round settles as soon as every obliged provider has submitted,
 or when anyone closes it after the window. Each round's value carries a
 tier:
 
-- **consensus**: at least the required number of providers agreed and the
-  value did not jump past the feed's quarantine band;
-- **provisional**: fewer providers, or a large jump; use with care;
+- **consensus**: at least the required number of providers agreed within
+  the feed's tolerance, they were at least two thirds of the providers the
+  round obliged, and the value did not jump past the feed's quarantine band
+  from the last final value;
+- **provisional**: enough providers agreed, but fewer than two thirds of the
+  obliged ones, or the value made such a jump; use with care;
 - **final**: either of the above once the dispute window has passed;
-- **disputed**: a dispute is open on it; wait or use the previous round;
-- **stale**: no round has settled for two intervals.
+- **disputed**: a dispute is open on it; meanwhile `Read` serves the last
+  final value;
+- **void**: a dispute voided it; `Read` serves the last final value;
+- **stale**: no round has produced a value for two intervals.
+
+A round in which fewer than the required number agree produces no value.
 
 A one-off feed has a single round at its resolve time. Options ("Home",
 "Draw", "Away") are supported as well as numbers, and the same rules apply.
 
-Feeds that run out of subscription money stop paying providers and, after
-enough empty rounds, are retired. The DAO can also update a feed's prices,
-minimum stake, tolerance and dispute window, retire it, or remove a provider
-by vote.
+A feed whose pool holds less than one round's pay is unfunded: its rounds
+still run and pay what remains, and missed rounds cost providers nothing
+until someone pays again. A recurring feed that goes 168 consecutive rounds
+(`deadFeedRounds`) without a value is retired; its providers are unseated
+and start unbonding. The DAO can also update a feed's prices, minimum
+stake, tolerance, quarantine band and dispute window, retire it, or remove a
+provider by vote.
 
 ## How it stays honest
 
@@ -88,15 +100,16 @@ by vote.
   frivolous dispute costs the bond; a voter who skips ballots or votes
   against the outcome loses a little stake each time.
 - **Sealed voting.** Dispute ballots are commit-reveal: votes are hidden
-  until everyone has committed, so nobody can follow the crowd. The heaviest
-  voters are capped at 20% of the vote when deciding, so no single holder
+  until everyone has committed, so nobody can follow the crowd. When
+  deciding, no address counts for more than 20% of the ballot's obligated
+  weight (the stake sealed for the epoch the ballot opened in), so no single holder
   decides alone. A ballot without enough participation rolls to a second
   round; a decided round can be appealed once for twice the bond.
 - **Nothing is trusted off chain.** The provider agents, the notifier bot
   and the command-line tool only save people gas and attention; the realms
   verify everything and keep working, more slowly, if every tool disappears.
-- **Money is accounted for.** Both realms publish a conservation check:
-  every coin they hold must equal the sum of what they owe (stakes,
+- **Money is accounted for.** The core and the DAO publish a conservation
+  check: the coins each holds must cover the sum of what it owes (stakes,
   credits, pools, rewards, bonds). The check is `ok` after every test and
   every run.
 - **Upgradeable, but not silently.** State and funds live in permanent
@@ -195,7 +208,7 @@ Gno realms under `gno.land/r/clockwork/gnoracle/` and pure packages under
 release); Go tools under `cmd/`, `agent/`, `bot/` and `internal/`.
 
 ```sh
-make toolchain deps        # the pinned gno toolchain and the on-chain dependency mirror
+make toolchain deps        # the pinned gno, gnokey and gnodev, and the on-chain dependency mirror
 make test go-test          # every Gno suite, then the Go tests
 make dev RPC=36657 WEB=38888   # a local chain with the realms and gnoweb
 make chain-test            # drive a whole lifecycle on it
@@ -203,6 +216,11 @@ make agent-soak            # several agents and the bot against it, with asserti
 make go-build              # bin/gnoracle, bin/gnoracle-agent, bin/gnoracle-bot
 make build deploy NS=<address>   # publish the realms under your namespace
 ```
+
+`make build` also replaces the bootstrap authority the sources name (the
+public test1 key) with `ADMIN`, which defaults to `NS` when that is an
+address; `make deploy` refuses a build that still names test1 on any chain
+other than the local `dev` one.
 
 CI runs the suites and publishes the container image
 `ghcr.io/clockworkgr/gnoracle`. The Kourt mirror pages carry the "built on

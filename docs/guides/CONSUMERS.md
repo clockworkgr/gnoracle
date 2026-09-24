@@ -3,8 +3,8 @@
 A realm reads a feed with one crossing call. The call changes nothing and
 costs nothing per read; what the core checks is that the calling realm is
 allowed to use the feed on chain: it holds a subscription that covers now,
-or the feed is sponsored, or it is a one-off outcome (public once final), or
-the realm is the feed's own requester. Off-chain readers use the public
+or the feed is sponsored, or it is a one-off outcome, or the realm is the
+feed's own requester. Off-chain readers use the public
 pages and JSON views, which show every value the moment it exists.
 
 ## From a realm
@@ -15,7 +15,7 @@ import oracle "gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/gnoracle/core
 func Settle(cur realm) {
 	value, decimals, round, updatedAt, tier := oracle.Read(cross(cur), feedID)
 	// value is an integer scaled by decimals: 1234567 with 6 decimals is 1.234567
-	// tier: consensus | provisional | final | disputed | stale | none, with ",unfunded" appended when the feed's pool is empty
+	// tier: consensus | provisional | final | disputed | void | stale | none, with ",unfunded" appended while the feed is unfunded
 	if tier != "final" && tier != "consensus" {
 		panic("no usable value")
 	}
@@ -27,6 +27,8 @@ func Settle(cur realm) {
 - `ReadFinal(cur, feedID)` returns the last final round, whatever later
   rounds are doing (the conservative choice for anything that moves money).
 - `ReadRound(cur, feedID, roundID)` returns a specific round.
+- `Render` is for people: a realm that calls it gets a short notice instead
+  of the page. Realms use `Read`, `ReadFinal` and `ReadRound`.
 - For option feeds (`valueType = "categorical"`) the value is the option
   index; the labels are in the spec.
 
@@ -36,17 +38,22 @@ is as fresh as its last poll (the demo's reader realm does that to show a
 history).
 
 What the tiers mean (plan §4.3): `consensus` is a round where at least
-`minProviders` agreed within tolerance and the value stayed within the
-quarantine band of the last final value; `provisional` had fewer or moved
-more; `final` is either once the dispute window passed; `disputed` means the
-latest round is under dispute, and the value returned with it is the last
-final round's, not the disputed one (zero and round 0 when no final round
-exists yet); a voided latest round also falls back to the last final one;
-`stale` means no round finalised within two intervals.
+`minProviders` agreed within tolerance, they were at least two thirds of
+the providers the round obliged, and the value stayed within the quarantine
+band of the last final value; `provisional` had enough agreement but fewer
+than two thirds of the obliged providers, or moved past the quarantine
+band; `final` is either once the dispute window passed; `disputed` means
+the latest round is under dispute, and the value returned with it is the
+last final round's, not the disputed one (zero and round 0 when no final
+round exists yet); `void` means a dispute voided the latest round, and
+`Read` then serves the last final round, labelled `final`; `stale` means no
+round produced a value within two intervals. `,unfunded` is appended while
+the feed's pool holds less than one round's pay.
 
 Keep the value a single `provisional` read controls below the feed's value
-at risk (half the active stake times the major-slash share, divided per
-provider). For anything larger use `ReadFinal`.
+at risk, shown on the feed's page: half of the active providers' stake
+times the major-slash share, times ⌈n/2⌉/n for n active providers. For
+anything larger use `ReadFinal`.
 
 ## Subscribing
 
@@ -54,22 +61,30 @@ A subscription names the reading realm by its package path and is paid per
 30-day period, 1 to 12 at a time, by anyone:
 
 ```sh
-gnoracle feed 1                                      # spec.subscriberPrice per period, subscribers
+gnoracle feed 1                                      # spec.subscriberPrice per period
 gnoracle subscribe 1 gno.land/r/you/app 3 30gnot     # SubscribeRealm: 3 periods x subscriberPrice
-gnoracle subscription 1 gno.land/r/you/app           # paidUntil, active
-gnoracle subscribers 1
+gnoracle subscription 1 gno.land/r/you/app           # paidUntil, active, paid, periods
+gnoracle subscribers 1                               # the feed's subscribers, 50 at a time
+gnoracle subscribers 1 50 100                        # from offset 50, up to 100 (the most per page)
 ```
 
-Paying again extends the same subscription from its current end. The price
-is per feed (`spec.subscriberPrice`, above the DAO's `subscriberFloor`);
+The path must have the shape of a realm path: `gno.land/r/` followed by
+segments of lowercase letters, digits and `_`, separated by single slashes,
+at most 128 bytes. Paying again extends the same subscription from its
+current end; `periods` counts every period paid so far. A subscriber page
+reports `more` when there is a next one.
+
+The price is per feed (`spec.subscriberPrice`, above the DAO's `subscriberFloor`);
 70% of it joins the feed's pool for the providers, 15% goes to DAO stakers
 and 15% to the treasury. Sponsored feeds (`spec.sponsored`) and one-off
 outcomes take no subscription: every realm may read them.
 
 A realm can also pay for itself from a prepaid balance its operator funds
-with `gnoracle deposit <amount> <realm address>`; the same balance pays a
-realm's feed requests and bounties, and receives its refunds. Reads never
-touch it.
+with `gnoracle deposit <amount> <realm address>`: the realm calls
+`SubscribeRealm` itself and the price comes out of its balance, whatever
+coins the transaction carried. The same balance pays the deposit and first
+funding of the realm's own feed requests, and receives their refunds. Reads
+never touch it.
 
 ## Off chain
 
@@ -79,9 +94,10 @@ gnoracle round 1 current
 gnoracle rounds 1 20
 ```
 
-or `vm/qrender` on `<core>:json/feed/1`. Everything the chain holds is
-public and shows at once; a subscription buys a realm the right to use a
-value in its own logic, not secrecy.
+or `vm/qrender` on `<core>:json/feed/1` (`json/feed/1/subscribers` and
+`json/feed/1/subscription/<realm path>` for subscriptions). Everything the
+chain holds is public and shows at once; a subscription buys a realm the
+right to use a value in its own logic, not secrecy.
 
 ## Trusting a feed
 

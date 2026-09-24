@@ -21,7 +21,6 @@ const (
 	ProposalPassed   = "passed"
 	ProposalRejected = "rejected"
 	ProposalExecuted = "executed"
-	ProposalFailed   = "failed"
 	ProposalExpired  = "expired"
 	ProposalCanceled = "canceled"
 
@@ -77,7 +76,7 @@ type Proposal struct {
 	Reason       string
 }
 
-// Ballot is one dispute vote (the disputes release fills it).
+// Ballot is one round of a dispute vote.
 type Ballot struct {
 	Dispute        uint64
 	Round          int64
@@ -103,7 +102,8 @@ type Ballot struct {
 	ResolvedAt     int64
 	TopReveals     string // packed heaviest reveals for clipping (impl-defined encoding)
 	PrevSeq        uint64 // the round-1 ballot this round-2 ballot follows
-	Final          bool   // the core applied the outcome (or the round rolled): rewards are fully funded, settle may run
+	Final          bool   // the core applied the outcome (or the round rolled or was appealed): rewards are fully funded, settle may run
+	Appealed       bool   // a round-1 decision an appeal superseded: it settles like a rolled round (round 2 decides)
 }
 
 // ------------------------------------------------------------- tables ----
@@ -136,6 +136,7 @@ type holdings struct {
 	RewardUgnot   int64 // dispute rewards owed in ugnot
 	DepositUgnot  int64 // proposal deposits held
 	KnownUgnot    int64 // balance already attributed (fees synced)
+	PendingPyth   int64 // sum of members' PendingPyth (credited, not yet paid)
 }
 
 func u64key(v uint64) string {
@@ -236,7 +237,8 @@ func ProposalCount() uint64 { return uint64(propSeq) }
 // BallotCount is the number of dispute ballots ever opened.
 func BallotCount() uint64 { return uint64(ballotSeq) }
 
-// MintedInYear returns what was minted in a 365-day bucket since genesis.
+// MintedInYear returns what was minted in one 365-day bucket; bucket n
+// covers block times [n*365d, (n+1)*365d) counted from the Unix epoch.
 func MintedInYear(year int64) int64 {
 	v := mints.Get(u64key(uint64(year)))
 	if v == nil {
@@ -271,10 +273,13 @@ func IterateMembers(offset, count int, fn func(*Member) bool) {
 
 // ------------------------------------------------------------- store ----
 
-// StateRef is the gated write capability handed to the live implementation.
+// StateRef is the gated write capability of this realm's own code: the proxy
+// entry points pass their cur to the live implementation, which gets a
+// StateRef only with that cur.
 type StateRef struct{ rlm realm }
 
-// Store hands out a StateRef to the live implementation or an extension.
+// Store hands out a StateRef for the realm's own live cur (the live
+// implementation acting inside a call to this realm).
 func Store(_ int, rlm realm) *StateRef {
 	assertStateAccess(0, rlm)
 	return &StateRef{rlm: rlm}
@@ -416,6 +421,7 @@ func (r *StateRef) MemberCreditReward(addr address, pyth, ugnot int64) {
 	if pyth > 0 {
 		m.PendingPyth += pyth
 		m.TotalRewarded += pyth
+		held.PendingPyth += pyth
 	}
 	if ugnot > 0 {
 		m.PendingUgnot += ugnot
@@ -443,6 +449,7 @@ func (r *StateRef) MemberPayRewards(addr address) (pyth, ugnot int64) {
 			}
 			held.RewardPyth -= fromPool
 			m.PendingPyth -= pyth
+			held.PendingPyth -= pyth
 			r.sendPyth(addr, pyth)
 		}
 	}
@@ -521,9 +528,30 @@ func TreasuryUgnot() int64 {
 	return held.KnownUgnot - held.FeeUgnot - held.RewardUgnot - held.DepositUgnot
 }
 
-// TreasuryPyth is what the treasury may spend in PYTH.
+// TreasuryPyth is the PYTH the realm holds beyond stakes and the penalty
+// pool. Part of it may back rewards already credited to members (see
+// ReservedPyth); proposals spend only TreasuryPythFree.
 func TreasuryPyth() int64 {
 	return pythBalance() - held.StakedPyth - held.UnbondingPyth - held.RewardPyth
+}
+
+// ReservedPyth is the part of members' credited PYTH rewards the penalty pool
+// does not cover: MemberPayRewards pays it from the treasury, so the treasury
+// may not spend it elsewhere.
+func ReservedPyth() int64 {
+	if owed := held.PendingPyth - held.RewardPyth; owed > 0 {
+		return owed
+	}
+	return 0
+}
+
+// TreasuryPythFree is the treasury PYTH a proposal may spend.
+func TreasuryPythFree() int64 {
+	free := TreasuryPyth() - ReservedPyth()
+	if free < 0 {
+		return 0
+	}
+	return free
 }
 
 // ---- proposals
@@ -535,6 +563,9 @@ func (r *StateRef) NewProposal(kind, payload, title string, proposer address, se
 	p := &Proposal{ID: id, Kind: kind, Payload: payload, Title: title, Proposer: proposer, CreatedAt: Now(),
 		SealedEpoch: sealed, VotingEnds: votingEnds, Timelock: timelock, Executable: votingEnds + timelock, Expires: expires,
 		QuorumBps: quorumBps, ThresholdBps: thresholdBps, Status: ProposalActive, Deposit: deposit}
+	if deposit < 0 || (deposit > 0 && held.KnownUgnot+deposit > ugnotBalance()) {
+		panic("dao: the proposal deposit did not arrive")
+	}
 	proposals.Set(u64key(id), p)
 	held.DepositUgnot += deposit
 	held.KnownUgnot += deposit // the deposit arrived with the call and is not fee income
@@ -617,13 +648,13 @@ func (r *StateRef) TreasurySendUgnot(to address, amount int64) {
 // TreasurySendPyth pays from the treasury's PYTH.
 func (r *StateRef) TreasurySendPyth(to address, amount int64) {
 	r.check()
-	if amount <= 0 || amount > TreasuryPyth() {
-		panic("dao: treasury PYTH insufficient")
+	if amount <= 0 || amount > TreasuryPythFree() {
+		panic("dao: treasury PYTH insufficient (rewards credited to members are reserved)")
 	}
 	r.sendPyth(to, amount)
 }
 
-// RecordMint records a mint in its year bucket and mints through the token.
+// Mint records a mint in its year bucket and mints through the token.
 func (r *StateRef) Mint(to address, amount int64, year int64) {
 	r.check()
 	if amount <= 0 {
@@ -633,7 +664,7 @@ func (r *StateRef) Mint(to address, amount int64, year int64) {
 	r.mintPyth(to, amount)
 }
 
-// ---- dispute ballots (records only; the disputes release drives them)
+// ---- dispute ballots (records only; the live implementation drives them)
 
 // NewBallot opens a ballot record and returns its sequence.
 func (r *StateRef) NewBallot(disputeID uint64, round int64, majorRequested bool, summary string, sealed uint32, obligated int64, commitEnds, revealEnds int64, prev uint64) uint64 {
@@ -714,7 +745,11 @@ func (r *StateRef) BallotResolve(seq uint64, outcome, tier string, uphold, overt
 	if outcome == "ROLL" {
 		b.Final = true // nothing further will be funded for a rolled round
 	}
+	if bondShare < 0 || (bondShare > 0 && held.KnownUgnot+bondShare > ugnotBalance()) {
+		panic("dao: the voters' share did not arrive")
+	}
 	held.RewardUgnot += bondShare
+	held.KnownUgnot += bondShare
 	emit("DisputeBallotResolved", "ballot", strconv.FormatUint(seq, 10), "dispute", strconv.FormatUint(b.Dispute, 10), "outcome", outcome, "tier", tier)
 }
 
@@ -734,9 +769,32 @@ func (r *StateRef) BallotFund(seq uint64, amount int64) {
 	if amount == 0 {
 		return
 	}
+	if held.KnownUgnot+amount > ugnotBalance() {
+		panic("dao: the voters' share did not arrive")
+	}
 	b.BondShareUgnot += amount
 	held.RewardUgnot += amount
 	held.KnownUgnot += amount
+}
+
+// BallotSupersede turns an appealed round-1 decision into a rolled round:
+// round 2 decides the dispute, so round 1 pays no rewards and charges no
+// incoherence; only absence and abstention are charged, to the treasury.
+// Nothing will be funded for it, so it is final at once.
+func (r *StateRef) BallotSupersede(seq uint64, expectedPool int64) {
+	r.check()
+	b := GetBallot(seq)
+	if b == nil {
+		panic("dao: unknown ballot")
+	}
+	if b.Phase != BallotResolved || b.Final {
+		panic("dao: only a resolved, unapplied ballot can be superseded")
+	}
+	b.Appealed = true
+	b.CoherentWeight = 0
+	b.ExpectedPool = expectedPool
+	b.Final = true
+	emit("DisputeBallotAppealed", "ballot", strconv.FormatUint(seq, 10), "dispute", strconv.FormatUint(b.Dispute, 10))
 }
 
 // ---- helpers

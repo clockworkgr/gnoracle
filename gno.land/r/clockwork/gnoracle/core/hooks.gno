@@ -65,8 +65,8 @@ func (r *StateRef) OpenAppeal(disputeID uint64) uint64 {
 	return mustHouse().OpenAppealRound(cross(rlm), disputeID)
 }
 
-// FundVoters sends amount to the DAO for the coherent voters of a dispute.
-// The amount must already have been taken out of a holdings category.
+// FundVoters sends amount of a dispute's held bonds to the DAO for its
+// coherent voters, taking it out of the Bonds category first.
 func (r *StateRef) FundVoters(disputeID uint64, amount int64) {
 	r.check()
 	if amount < 0 {
@@ -74,9 +74,13 @@ func (r *StateRef) FundVoters(disputeID uint64, amount int64) {
 	}
 	rlm := r.rlm
 	if amount > 0 {
+		if amount > held.Bonds {
+			panic("core: bond accounting short")
+		}
 		if amount > Balance() {
 			panic("core: insufficient realm balance")
 		}
+		held.Bonds -= amount
 		b := banker.NewBanker(banker.BankerTypeRealmSend, rlm)
 		b.SendCoins(rlm.Address(), chain.PackageAddress(DAOPath), chain.NewCoins(chain.NewCoin(StakeDenom, amount)))
 	}

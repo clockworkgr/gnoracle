@@ -52,18 +52,19 @@ func (r *StateRef) sendUgnot(to address, amount int64) {
 		panic("dao: send needs a positive amount")
 	}
 	if r.rlm.PkgPath() != selfPath {
-		panic("dao: extensions may read and write state but not move coins")
+		panic("dao: only the DAO realm may move coins")
 	}
 	if amount > ugnotBalance() {
 		panic("dao: insufficient realm balance")
 	}
+	// every payout comes out of an attributed category, so it is part of
+	// KnownUgnot; anything else is an accounting bug and must not pass
+	if amount > held.KnownUgnot {
+		panic("dao: ugnot accounting short")
+	}
 	b := banker.NewBanker(banker.BankerTypeRealmSend, r.rlm)
 	b.SendCoins(r.rlm.Address(), to, chain.NewCoins(chain.NewCoin(FeeDenom, amount)))
-	if held.KnownUgnot >= amount {
-		held.KnownUgnot -= amount
-	} else {
-		held.KnownUgnot = 0
-	}
+	held.KnownUgnot -= amount
 }
 
 // Health reports the conservation invariants of both ledgers.
@@ -76,9 +77,18 @@ func Health() string {
 	if owedPyth > pyth || owedUgnot > ugnot || held.KnownUgnot > ugnot {
 		status = "BROKEN"
 	}
+	// credited PYTH rewards the penalty pool does not cover are backed by
+	// the treasury; a treasury smaller than that is a shortfall, not a
+	// broken ledger (MemberPayRewards reports it per member)
+	if ReservedPyth() > TreasuryPyth() {
+		status = "SHORTFALL"
+	}
 	return `{"status":"` + status + `","pyth":` + strconv.FormatInt(pyth, 10) +
 		`,"owedPyth":` + strconv.FormatInt(owedPyth, 10) +
+		`,"pendingMemberPyth":` + strconv.FormatInt(held.PendingPyth, 10) +
+		`,"reservedPyth":` + strconv.FormatInt(ReservedPyth(), 10) +
 		`,"treasuryPyth":` + strconv.FormatInt(TreasuryPyth(), 10) +
+		`,"treasuryPythFree":` + strconv.FormatInt(TreasuryPythFree(), 10) +
 		`,"ugnot":` + strconv.FormatInt(ugnot, 10) +
 		`,"owedUgnot":` + strconv.FormatInt(owedUgnot, 10) +
 		`,"treasuryUgnot":` + strconv.FormatInt(TreasuryUgnot(), 10) +
@@ -225,6 +235,35 @@ func (r *StateRef) KourtAbandon(disputeID uint64, reason string) {
 	r.check()
 	rlm := r.rlm
 	kourt.Abandon(cross(rlm), disputeID, reason)
+}
+
+// KourtRedeem executes a kourt-redeem proposal: the mirror realm converts
+// amount of its court coin back to GNOT and sends the proceeds here. They
+// are the treasury's own money coming home, not fee income, so they are
+// booked to the treasury directly instead of being left for FeesSync to
+// split with stakers. Returns the proceeds.
+func (r *StateRef) KourtRedeem(amount int64) int64 {
+	r.check()
+	if amount <= 0 {
+		panic("dao: amount must be positive")
+	}
+	// attribute anything that arrived earlier under the normal rule first
+	r.FeesSync()
+	before := ugnotBalance()
+	rlm := r.rlm
+	payout := kourt.RedeemFloat(cross(rlm), amount)
+	if arrived := ugnotBalance() - before; arrived > 0 {
+		held.KnownUgnot += arrived
+	}
+	emit("KourtFloatRedeemed", "amount", strconv.FormatInt(amount, 10), "proceeds", strconv.FormatInt(payout, 10))
+	return payout
+}
+
+// KourtSetAttribution executes a kourt-attribution proposal.
+func (r *StateRef) KourtSetAttribution(text string) {
+	r.check()
+	rlm := r.rlm
+	kourt.SetAttribution(cross(rlm), text)
 }
 
 // ---- own-realm parameters and releases

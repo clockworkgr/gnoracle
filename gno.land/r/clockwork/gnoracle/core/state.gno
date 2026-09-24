@@ -67,8 +67,7 @@ type Feed struct {
 	Prepaid      int64 // the requester's first period or bounty, escrowed until activation
 	Pool         int64 // long-lived funds: subscriptions, bounty
 	Drip         int64 // paid from Pool per round (0 for one-off: the whole pool)
-	FeeAccrued   int64 // metered fees (provider share) since the last finalisation
-	PenaltyCarry int64 // miss slashes waiting for the next round pool
+	PenaltyCarry int64 // miss slashes, dust and bond shares waiting for the next round pool
 	PaidUntil    int64 // subscription coverage end (informational)
 
 	// providers: MaxSlots cells of slotWidth bytes; a blank cell is spaces
@@ -82,8 +81,8 @@ type Feed struct {
 	lastValue     int64 // served value: realms get it through Read, the implementation through the StateRef
 	LastTier      string
 	LastRound     uint64
-	LastRoundAt   int64 // open time of the round that produced LastValue
-	LastFinalAt   int64 // block time LastValue's round was finalised
+	LastRoundAt   int64 // open time of the round that produced the served value
+	LastFinalAt   int64 // block time the served value's round was finalised
 	// the last final value: the newest aggregated round whose dispute window
 	// passed without a dispute standing against it. Served while the latest
 	// round is disputed or voided, and the quarantine reference (plan §4.3, §7.1).
@@ -99,8 +98,8 @@ type Feed struct {
 	OpenDisputes  int64
 	LastDisputeAt int64
 	DisputesInRow int64
-	SubsidyPerRnd int64
-	SubsidyRemain int64
+	SubsidyPerRnd int64 // reserved for the treasury-funded bootstrap subsidy (plan §6.2)
+	SubsidyRemain int64 // reserved, as above
 	TotalPaidOut  int64
 	RoundsFinal   int64
 	DeclaredValue int64 // trusted requester's declared value at stake
@@ -135,7 +134,7 @@ type Provider struct {
 }
 
 // Round is one aggregation round of a feed. Submissions live inline, packed
-// into Values (MaxSlots big-endian int64 cells), so a round is one small
+// into values (MaxSlots big-endian int64 cells), so a round is one small
 // object to read and write.
 type Round struct {
 	Feed          uint64
@@ -221,8 +220,15 @@ type Subscription struct {
 	Periods   int64
 }
 
-// DisputeRecord is a challenge to one round (logic arrives with the disputes
-// release; the record lives here so it survives that upgrade).
+// DisputeRecord is a challenge to one round. The record lives here so it
+// survives every upgrade.
+//
+// PriorValue (the disputed round's value) and ProposedValue (the disputer's
+// value) are public through GetDispute to every realm, unlike round values,
+// which realms read through ReadRound under the read gate. That is accepted:
+// the disputed value and the disputer's proposal are part of the public
+// dispute that voters decide on, and neither is a served value. ReadRound is
+// the supported way for a realm to learn what a round resolved to.
 type DisputeRecord struct {
 	ID            uint64
 	Feed          uint64
@@ -352,10 +358,30 @@ func IsSubscribed(feed uint64, pkgPath string, t int64) bool {
 	return s != nil && s.PaidUntil > t
 }
 
-// IterateSubscriptions visits a feed's subscriptions in realm-path order.
+// IterateSubscriptions visits a feed's subscriptions in realm-path order
+// until fn returns true. A feed may have any number of them: bound the walk
+// in fn, or page with IterateSubscriptionsFrom.
 func IterateSubscriptions(feed uint64, fn func(*Subscription) bool) {
 	prefix := feedKey(feed)
 	subs.Iterate(prefix, prefix+"\xff", func(k string, v any) bool { return fn(v.(*Subscription)) })
+}
+
+// IterateSubscriptionsFrom visits at most count of a feed's subscriptions,
+// skipping the first offset, in realm-path order.
+func IterateSubscriptionsFrom(feed uint64, offset, count int, fn func(*Subscription) bool) {
+	if count <= 0 {
+		return
+	}
+	prefix := feedKey(feed)
+	skipped, visited := 0, 0
+	subs.Iterate(prefix, prefix+"\xff", func(_ string, v any) bool {
+		if skipped < offset {
+			skipped++
+			return false
+		}
+		visited++
+		return fn(v.(*Subscription)) || visited >= count
+	})
 }
 
 func subKey(feed uint64, pkgPath string) string { return feedKey(feed) + pkgPath }
@@ -442,12 +468,11 @@ func ReverseIterateRounds(feed uint64, count int, fn func(*Round) bool) {
 // ------------------------------------------------------------- store ----
 
 // StateRef is a permission to change the state, handed to code running on
-// this realm's live cur (the accepted implementation, or a registered
-// extension). It carries the realm value and re-checks it on every write, so
-// it cannot be stashed or replayed.
+// this realm's live cur (the accepted implementation). It carries the realm
+// value and re-checks it on every write, so it cannot be stashed or replayed.
 type StateRef struct{ rlm realm }
 
-// Store hands out a StateRef to the live implementation or an extension.
+// Store hands out a StateRef to the live implementation.
 func Store(_ int, rlm realm) *StateRef {
 	assertStateAccess(0, rlm)
 	return &StateRef{rlm: rlm}
@@ -567,18 +592,16 @@ func (r *StateRef) FeedActivate(id uint64, startAt, drip int64) {
 	emit("FeedActivated", "feed", u(id), "startAt", strconv.FormatInt(startAt, 10))
 }
 
-// FeedSetStart changes the first-round time (reopening a one-off).
-func (r *StateRef) FeedSetStart(id uint64, startAt int64, reopened bool) {
-	r.check()
-	f := mustFeed(id)
-	f.StartAt = startAt
-	f.Reopened = reopened
-}
-
 // FeedResetForReopen restarts a voided one-off feed at a new resolve time.
+// The slot log is rebased on the current seating: the new round 0 is owed by
+// the providers seated now, not by those who held a slot the first time
+// (a one-off's log has entries at rounds 0 and 1 only, so this is bounded).
 func (r *StateRef) FeedResetForReopen(id uint64, startAt int64) {
 	r.check()
 	f := mustFeed(id)
+	if f.Spec == nil || f.Spec.IsRecurring() {
+		panic("core: only a one-off feed reopens")
+	}
 	f.StartAt = startAt
 	f.Reopened = true
 	f.HaveLast = false
@@ -587,12 +610,21 @@ func (r *StateRef) FeedResetForReopen(id uint64, startAt int64) {
 	f.LastTier = ""
 	f.EmptyStreak = 0
 	rounds.Remove(roundKey(id, 0))
+	removeByPrefix(slotlog, u64key(id))
+	for s := 0; s < MaxSlots; s++ {
+		if holder := f.SlotAt(s); holder != "" {
+			slotlog.Set(slotKey(id, int64(s), 0), holder)
+		}
+	}
 	emit("FeedReopened", "feed", u(id), "resolveAt", strconv.FormatInt(startAt, 10))
 }
 
 // FeedSetDrip changes the per-round drip.
 func (r *StateRef) FeedSetDrip(id uint64, drip int64) {
 	r.check()
+	if drip < 0 {
+		panic("core: drip must not be negative")
+	}
 	mustFeed(id).Drip = drip
 }
 
@@ -620,12 +652,6 @@ func (r *StateRef) FeedSetValue(id uint64, round uint64, value int64, tier strin
 	f.LastRound = round
 	f.LastRoundAt = roundAt
 	f.LastFinalAt = Now()
-}
-
-// FeedSetTier updates the tier of the served value (e.g. provisional -> final).
-func (r *StateRef) FeedSetTier(id uint64, tier string) {
-	r.check()
-	mustFeed(id).LastTier = tier
 }
 
 // FeedSetEmptyStreak records consecutive empty rounds.
@@ -694,19 +720,49 @@ func (r *StateRef) FeedSetDisputeCounters(id uint64, open, inRow int64, lastAt i
 	f.LastDisputeAt = lastAt
 }
 
-// FeedDelete removes a feed record (after its rounds and providers are gone).
-func (r *StateRef) FeedDelete(id uint64) {
+// PruneBatch is the most index entries FeedDelete removes per call.
+const PruneBatch = 256
+
+// FeedDelete reclaims a retired feed (after its rounds and providers are
+// gone): it removes at most PruneBatch of its index entries (slot log,
+// sponsorships, realm subscriptions) per call and the feed record itself
+// once none are left. It reports whether the record is gone; the caller
+// calls again until it is, so any number of entries can be reclaimed.
+func (r *StateRef) FeedDelete(id uint64) bool {
 	r.check()
 	f := mustFeed(id)
-	if f.Pool != 0 || f.FeeAccrued != 0 || f.PenaltyCarry != 0 || f.Deposit != 0 || f.Prepaid != 0 {
+	if f.Pool != 0 || f.PenaltyCarry != 0 || f.Deposit != 0 || f.Prepaid != 0 {
 		panic("core: feed still holds funds")
 	}
-	// reclaim the feed's index entries: slot log, sponsorships, sponsored consumers
-	removeByPrefix(slotlog, u64key(id))
-	removeByPrefix(sponsors, u64key(id))
-	removeByPrefix(subs, u64key(id))
+	budget := PruneBatch
+	for _, t := range []*bptree.BPTree{slotlog, sponsors, subs} {
+		budget -= removeUpTo(t, u64key(id), budget)
+		if budget == 0 {
+			emit("FeedPruning", "feed", u(id))
+			return false
+		}
+	}
 	feeds.Remove(feedKey(id))
 	emit("FeedPruned", "feed", u(id))
+	return true
+}
+
+// removeUpTo deletes at most max entries whose key starts with prefix and
+// returns how many it deleted (keys are collected first: the tree must not
+// change while it is iterated).
+func removeUpTo(t *bptree.BPTree, prefix string, max int) int {
+	if max <= 0 {
+		return 0
+	}
+	keys := []string{}
+	t.Iterate(prefix, prefix+"\xff", func(k string, _ any) bool {
+		keys = append(keys, k)
+		return len(keys) >= max
+	})
+	for _, k := range keys {
+		t.Remove(k)
+	}
+	return len(keys)
 }
 
 // removeByPrefix deletes every entry whose key starts with prefix (the
@@ -958,30 +1014,6 @@ func (r *StateRef) RoundFinalise(feed, id uint64, status, tier string, value int
 		"value", strconv.FormatInt(value, 10), "eligible", strconv.Itoa(popcount(eligibleMask)), "pool", strconv.FormatInt(pool, 10))
 }
 
-// RoundSetTier changes a finalised round's tier (provisional -> final).
-func (r *StateRef) RoundSetTier(feed, id uint64, tier string) {
-	r.check()
-	rd := GetRound(feed, id)
-	if rd == nil {
-		panic("core: unknown round")
-	}
-	rd.Tier = tier
-}
-
-// RoundSetDispute links a round to a dispute and marks an overturn.
-func (r *StateRef) RoundSetDispute(feed, id uint64, disputeID uint64, overturned bool, value int64, status, tier string) {
-	r.check()
-	rd := GetRound(feed, id)
-	if rd == nil {
-		panic("core: unknown round")
-	}
-	rd.DisputeID = disputeID
-	rd.Overturned = overturned
-	rd.value = value
-	rd.Status = status
-	rd.Tier = tier
-}
-
 // RoundDelete removes a round record.
 func (r *StateRef) RoundDelete(feed, id uint64) {
 	r.check()
@@ -1055,31 +1087,40 @@ func (r *StateRef) SponsorPay(feed uint64, sponsor address, amount int64, paidUn
 	emit("Sponsored", "feed", u(feed), "sponsor", string(sponsor), "amount", strconv.FormatInt(amount, 10), "paidUntil", strconv.FormatInt(paidUntil, 10))
 }
 
-// SubscribePay records a realm's subscription paid with coins attached to
-// the call (amount 0 records a free period on a zero-priced feed).
-func (r *StateRef) SubscribePay(feed uint64, pkgPath string, amount, paidUntil int64) {
+// SubscribePay records periods of a realm's subscription paid with coins
+// attached to the call (amount 0 records free periods on a zero-priced feed).
+func (r *StateRef) SubscribePay(feed uint64, pkgPath string, amount, periods, paidUntil int64) {
 	r.check()
+	if amount < 0 {
+		panic("core: amount must not be negative")
+	}
 	if amount > 0 {
 		r.inflow(amount)
 		r.splitSubscription(feed, amount)
 	}
-	r.subscribe(feed, pkgPath, amount, paidUntil)
+	r.subscribe(feed, pkgPath, amount, periods, paidUntil)
 }
 
-// SubscribeFromCredit records a realm's subscription paid from a prepaid
-// balance already held by the realm.
-func (r *StateRef) SubscribeFromCredit(payer address, feed uint64, pkgPath string, amount, paidUntil int64) {
+// SubscribeFromCredit records periods of a realm's subscription paid from a
+// prepaid balance already held by the realm.
+func (r *StateRef) SubscribeFromCredit(payer address, feed uint64, pkgPath string, amount, periods, paidUntil int64) {
 	r.check()
+	if amount < 0 {
+		panic("core: amount must not be negative")
+	}
 	if amount > 0 {
 		r.creditSpend(payer, amount)
 		r.splitSubscription(feed, amount)
 	}
-	r.subscribe(feed, pkgPath, amount, paidUntil)
+	r.subscribe(feed, pkgPath, amount, periods, paidUntil)
 }
 
-func (r *StateRef) subscribe(feed uint64, pkgPath string, amount, paidUntil int64) {
+func (r *StateRef) subscribe(feed uint64, pkgPath string, amount, periods, paidUntil int64) {
 	if pkgPath == "" || len(pkgPath) > 128 {
 		panic("core: a subscription names a realm path of at most 128 bytes")
+	}
+	if periods < 1 {
+		panic("core: a subscription pays at least one period")
 	}
 	mustFeed(feed)
 	s := GetSubscription(feed, pkgPath)
@@ -1089,7 +1130,7 @@ func (r *StateRef) subscribe(feed uint64, pkgPath string, amount, paidUntil int6
 	}
 	s.PaidUntil = paidUntil
 	s.Paid += amount
-	s.Periods++
+	s.Periods += periods
 	emit("RealmSubscribed", "feed", u(feed), "realm", pkgPath, "amount", strconv.FormatInt(amount, 10), "paidUntil", strconv.FormatInt(paidUntil, 10))
 }
 
@@ -1125,7 +1166,7 @@ func (r *StateRef) RoundValueAt(feed, id uint64, slot int) int64 {
 // share to the feed's long-lived pool, the rest to the pending fee pool.
 func (r *StateRef) splitSubscription(feed uint64, amount int64) {
 	f := mustFeed(feed)
-	providerShare := amount * Param("feeSplitProvidersBps") / 10_000
+	providerShare := MulBps(amount, Param("feeSplitProvidersBps"))
 	f.Pool += providerShare
 	held.Pools += providerShare
 	held.FeesPending += amount - providerShare
@@ -1196,8 +1237,7 @@ func (r *StateRef) payProposer(f *Feed, amount int64) {
 }
 
 // FeedPoolRefund returns a one-off feed's undistributed bounty (pool and
-// carry) to the proposer when the feed is retired; read fees stay for the
-// fee pool.
+// carry) to the proposer when the feed is retired.
 func (r *StateRef) FeedPoolRefund(feed uint64) int64 {
 	r.check()
 	f := mustFeed(feed)
@@ -1205,12 +1245,6 @@ func (r *StateRef) FeedPoolRefund(feed uint64) int64 {
 	f.Pool, f.PenaltyCarry = 0, 0
 	held.Pools -= amount
 	r.payProposer(f, amount)
-	if f.FeeAccrued > 0 {
-		fees := f.FeeAccrued
-		f.FeeAccrued = 0
-		held.Pools -= fees
-		held.FeesPending += fees
-	}
 	return amount
 }
 
@@ -1239,8 +1273,8 @@ func (r *StateRef) CreditSpendOnFeed(addr address, feed uint64, deposit, funding
 func (r *StateRef) FeedPoolToFees(feed uint64) int64 {
 	r.check()
 	f := mustFeed(feed)
-	amount := f.Pool + f.FeeAccrued + f.PenaltyCarry
-	f.Pool, f.FeeAccrued, f.PenaltyCarry = 0, 0, 0
+	amount := f.Pool + f.PenaltyCarry
+	f.Pool, f.PenaltyCarry = 0, 0
 	held.Pools -= amount
 	held.FeesPending += amount
 	return amount
@@ -1259,14 +1293,16 @@ func (r *StateRef) RoundPayout(feed uint64, eligible []address, cranker address)
 	if drip > f.Pool {
 		drip = f.Pool
 	}
-	pool = drip + f.FeeAccrued + f.PenaltyCarry
+	if drip < 0 {
+		drip = 0
+	}
+	pool = drip + f.PenaltyCarry
 	f.Pool -= drip
-	f.FeeAccrued = 0
 	f.PenaltyCarry = 0
 	if pool == 0 {
 		return 0, 0, 0
 	}
-	tip = pool * Param("crankTipBps") / 10_000
+	tip = MulBps(pool, Param("crankTipBps"))
 	rest := pool - tip
 	n := int64(len(eligible))
 	if n == 0 {
@@ -1338,7 +1374,7 @@ func (r *StateRef) MissSlash(feed uint64, addr address, amount int64, alerter ad
 	}
 	p.TotalSlashed += amount
 	p.MissSlashedEpoch += amount
-	alert := amount * Param("alerterShareBps") / 10_000
+	alert := MulBps(amount, Param("alerterShareBps"))
 	carry := amount - alert
 	f := mustFeed(feed)
 	f.PenaltyCarry += carry
@@ -1469,17 +1505,13 @@ func (r *StateRef) BondToFees(id uint64, amount int64) {
 	held.FeesPending += amount
 }
 
-// BondToVoters moves part of a held bond out of the Bonds category for
-// FundVoters, which sends it to the DAO.
+// BondToVoters sends part of a held bond to the DAO for the dispute's
+// coherent voters (FundVoters takes it out of the Bonds category).
 func (r *StateRef) BondToVoters(id uint64, amount int64) {
 	r.check()
 	if amount <= 0 {
 		return
 	}
-	if amount > held.Bonds {
-		panic("core: bond accounting short")
-	}
-	held.Bonds -= amount
 	r.FundVoters(id, amount)
 }
 
@@ -1494,7 +1526,7 @@ func (r *StateRef) SlashProvider(feed uint64, addr address, bps int64, tier stri
 	if p == nil {
 		return 0
 	}
-	amount := (p.Stake + p.UnbondAmount) * bps / 10_000
+	amount := MulBps(p.Stake+p.UnbondAmount, bps)
 	if amount <= 0 {
 		return 0
 	}
@@ -1570,8 +1602,9 @@ func (r *StateRef) RoundOverturn(feed, id uint64, value int64) {
 	}
 }
 
-// RoundVoid marks a round void after a dispute; a voided latest round leaves
-// the feed without a served value.
+// RoundVoid marks a round void after a dispute. A voided latest round keeps
+// its place as the feed's latest round with tier "void"; Read then serves
+// the last final round in its place.
 func (r *StateRef) RoundVoid(feed, id uint64) {
 	r.check()
 	rd := GetRound(feed, id)
@@ -1642,6 +1675,12 @@ func setTrusted(pkgPath string, cap int64) {
 }
 
 // ---- helpers
+
+// MulBps is a*bps/10000 rounded down, computed without the a*bps product so
+// it cannot overflow for any a up to MaxInt64 and bps up to 10000.
+func MulBps(a, bps int64) int64 {
+	return a/10_000*bps + a%10_000*bps/10_000
+}
 
 func u(v uint64) string { return strconv.FormatUint(v, 10) }
 

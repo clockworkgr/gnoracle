@@ -97,7 +97,7 @@ func dripFor(sp *spec.Spec) int64 {
 	if perRound < 1 {
 		perRound = 1
 	}
-	share := sp.SubscriptionPrice * param("feeSplitProvidersBps") / 10_000
+	share := core.MulBps(sp.SubscriptionPrice, param("feeSplitProvidersBps"))
 	return share / perRound
 }
 
@@ -122,7 +122,13 @@ func (*implV1) DeprecateFeed(_ int, rlm realm, feedID uint64, reason string) {
 	} else {
 		st.FeedPoolRefund(feedID) // an undistributed bounty is the requester's
 	}
-	// nothing will be served again: every seated provider starts unbonding
+	retire(st, feedID, reason)
+}
+
+// retire unseats every active or jailed provider (nothing will be served
+// again, so each starts unbonding) and marks the feed deprecated. The
+// caller has already routed the feed's funds.
+func retire(st *core.StateRef, feedID uint64, reason string) {
 	var seated []*core.Provider
 	core.IterateProviders(feedID, func(p *core.Provider) bool {
 		if p.Status == core.ProviderActive || p.Status == core.ProviderJailed {
@@ -138,8 +144,8 @@ func (*implV1) DeprecateFeed(_ int, rlm realm, feedID uint64, reason string) {
 }
 
 // UpdateFeed changes the DAO-adjustable economics of a feed. The payload is a
-// JSON object with any of readPrice, subscriptionPrice, providerMinStake,
-// toleranceBps, quarantineBps, disputeWindow.
+// JSON object with any of subscriberPrice, subscriptionPrice,
+// providerMinStake, toleranceBps, quarantineBps, disputeWindow.
 func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
@@ -174,7 +180,17 @@ func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 	quar = get("quarantineBps", quar)
 	window = get("disputeWindow", window)
 	lim := limits()
+	// the same dispute-window ceiling spec.Parse applies to a new feed
+	maxWindow := spec.MaxDisputeWindow
+	if lim.MaxDisputeWindow > 0 && lim.MaxDisputeWindow < maxWindow {
+		maxWindow = lim.MaxDisputeWindow
+	}
+	if maxWindow < spec.MinDisputeWindow {
+		maxWindow = spec.MinDisputeWindow
+	}
 	switch {
+	case subscriberPrice > spec.MaxAmount || subPrice > spec.MaxAmount || minStake > spec.MaxAmount:
+		panic("gnoracle: prices and stakes must be at most " + i(spec.MaxAmount) + StakeUnit)
 	case sp.IsRecurring() && !sp.Sponsored && subscriberPrice < lim.SubscriberFloor:
 		panic("gnoracle: subscriberPrice is below the floor")
 	case (!sp.IsRecurring() || sp.Sponsored) && subscriberPrice != 0:
@@ -187,8 +203,8 @@ func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 		panic("gnoracle: toleranceBps out of range")
 	case quar < tol || quar > spec.MaxQuarantineBps:
 		panic("gnoracle: quarantineBps out of range")
-	case window < spec.MinDisputeWindow || window > spec.MaxDisputeWindow:
-		panic("gnoracle: disputeWindow out of range")
+	case window < spec.MinDisputeWindow || window > maxWindow:
+		panic("gnoracle: disputeWindow must be between " + i(spec.MinDisputeWindow) + " and " + i(maxWindow) + " seconds")
 	}
 	st.FeedSetSpecEconomics(feedID, subscriberPrice, subPrice, minStake, tol, quar, window)
 	if sp.IsRecurring() && subPrice != sp.SubscriptionPrice {
@@ -244,7 +260,10 @@ func (*implV1) FundBounty(_ int, rlm realm, feedID uint64, sent int64) {
 	st.BountyIn(feedID, sent)
 }
 
-// PruneRounds deletes settled rounds past retention, oldest first.
+// PruneRounds deletes settled rounds past retention, oldest first. It first
+// promotes what has become final, and never deletes a round the last-final
+// cursor has not passed: an aggregated round must be considered for
+// promotion before it can go.
 func (*implV1) PruneRounds(_ int, rlm realm, caller address, feedID uint64, maxRounds int64) int64 {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
@@ -254,6 +273,8 @@ func (*implV1) PruneRounds(_ int, rlm realm, caller address, feedID uint64, maxR
 	if !f.HaveLast {
 		return 0
 	}
+	st.FeedPromoteFinal(feedID)
+	f = mustFeed(feedID)
 	retention := param("roundRetention")
 	keep := uint64(param("minRoundsKept"))
 	t := now()
@@ -262,7 +283,7 @@ func (*implV1) PruneRounds(_ int, rlm realm, caller address, feedID uint64, maxR
 	}
 	var deleted int64
 	next := f.OldestRound
-	for deleted < maxRounds && next <= f.LastFinalized {
+	for deleted < maxRounds && next <= f.LastFinalized && next < f.FinalCursor {
 		if f.LastFinalized-next < keep {
 			break
 		}
@@ -288,6 +309,8 @@ func (*implV1) PruneRounds(_ int, rlm realm, caller address, feedID uint64, maxR
 }
 
 // PruneFeed deletes a deprecated feed once its rounds and providers are gone.
+// The feed's index entries are removed core.PruneBatch per call; call again
+// until the feed is gone (the FeedPruned event).
 func (*implV1) PruneFeed(_ int, rlm realm, caller address, feedID uint64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
@@ -329,6 +352,8 @@ func (*implV1) PruneFeed(_ int, rlm realm, caller address, feedID uint64) {
 	if left {
 		panic("gnoracle: providers still hold stake on this feed")
 	}
-	st.FeedPoolToFees(feedID) // fees metered after deprecation
+	// anything that reached the pool after deprecation (bond shares routed
+	// by a dispute resolved late) goes to the fees
+	st.FeedPoolToFees(feedID)
 	st.FeedDelete(feedID)
 }

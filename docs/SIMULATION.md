@@ -36,10 +36,15 @@ margin: the annual return a provider wants on the 10,000 GNOT floor.
 | 1 d | 5 | 4.33 GNOT | 6.19 GNOT ($0.38) | 303.81 GNOT ($18.84) | 899.05 GNOT ($55.74) |
 | 1 d | 7 | 5.66 GNOT | 8.09 GNOT ($0.50) | 424.76 GNOT ($26.33) | 1258.09 GNOT ($78.00) |
 
-Reading: the 1,000 GNOT default subscription (about $62) covers an hourly
+Reading: a 1,000 GNOT subscription (about $62) covers an hourly
 feed with 5 providers at a 5% stake return; a 5-minute feed needs several
 sponsors or a higher price; a one-minute feed is not viable at mainnet gas
 prices and should be built as a Gnoswap-TWAP `qeval` read instead.
+
+Not modelled: realm subscriptions (a reading realm pays the feed's
+subscriberPrice per 30-day period, 70% of it to the round pool) add to the
+providers' income beyond the feed funding above, so every subscribed realm
+lowers the price the feed's sponsors must pay.
 
 ## 3. Where a subscription goes
 
@@ -81,8 +86,9 @@ attentive member never pays. A member who always abstains pays a tenth.
 
 Bond = max(2,500 GNOT, 10% of the feed's active stake), doubling for repeat
 disputes within 7 days (up to 16x). On UPHOLD the bond is forfeited 50% to
-the providers, 30% to coherent voters, 20% to the treasury; on OVERTURN the
-disputer gets the bond back plus 50% of the slash.
+the providers, 30% to coherent voters, 20% to the fee pool (half to stakers,
+half to the treasury); on OVERTURN the disputer gets the bond back plus
+50% of the slash.
 
 | active stake | bond | minor slash (5%) to disputer | major slash (100%) to disputer |
 |---|---|---|---|

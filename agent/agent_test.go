@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/clockworkgr/gnoracle/internal/gnochain"
 )
 
 func rat(s string) *big.Rat { r, _ := new(big.Rat).SetString(s); return r }
@@ -231,5 +233,30 @@ func TestStateRoundTrip(t *testing.T) {
 	b, _ := os.ReadFile(j.path)
 	if len(b) == 0 {
 		t.Fatal("journal empty")
+	}
+}
+
+func TestSanityRefLatest(t *testing.T) {
+	v := func(x int64) *int64 { return &x }
+	cases := []struct {
+		name  string
+		st    FeedState
+		f     gnochain.FeedInfo
+		want  int64
+		wantK bool
+	}{
+		{"nothing", FeedState{}, gnochain.FeedInfo{}, 0, false},
+		{"public only", FeedState{}, gnochain.FeedInfo{Value: v(100), LastRound: 4}, 100, true},
+		{"own only", FeedState{HasValue: true, LastValue: 90, ValueRound: 3}, gnochain.FeedInfo{}, 90, true},
+		{"own later", FeedState{HasValue: true, LastValue: 90, ValueRound: 9}, gnochain.FeedInfo{Value: v(100), LastRound: 8}, 90, true},
+		{"public later", FeedState{HasValue: true, LastValue: 90, ValueRound: 3}, gnochain.FeedInfo{Value: v(100), LastRound: 8}, 100, true},
+		{"same round", FeedState{HasValue: true, LastValue: 90, ValueRound: 8}, gnochain.FeedInfo{Value: v(100), LastRound: 8}, 100, true},
+		{"own of unknown round", FeedState{HasValue: true, LastValue: 90}, gnochain.FeedInfo{Value: v(100), LastRound: 1}, 100, true},
+	}
+	for _, c := range cases {
+		got, ok := sanityRef(c.st, &c.f)
+		if got != c.want || ok != c.wantK {
+			t.Errorf("%s: sanityRef = %d, %v; want %d, %v", c.name, got, ok, c.want, c.wantK)
+		}
 	}
 }

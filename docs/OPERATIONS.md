@@ -28,7 +28,9 @@ keeps working; rounds and disputes wait for whoever cranks next.
 
 ## 2. Deploying
 
-Prerequisites: `make toolchain` (builds gno v1.2.0 into `~/.cache/gno-toolchains/v1.2.0`),
+Prerequisites: `make toolchain` (builds gno, gnokey and gnodev v1.2.0 into
+`~/.cache/gno-toolchains/v1.2.0`; the gnodev step is the `gnodev-build`
+target, and `make dev` stops early when gnodev is missing),
 `make deps` (mirrors the on-chain imports into `deps/`), a funded deployer key
 in a gnokey keybase. The deployer address is the namespace, so the deployer
 key is the one that owns `gno.land/r/<addr>/...`.
@@ -36,15 +38,25 @@ key is the one that owns `gno.land/r/<addr>/...`.
 ```sh
 make test                                  # every Gno suite, pinned toolchain
 make go-test go-build                      # the tools
-make build NS=g1lnk...                     # rewrites clockwork -> NS into build/, strips tests
+make build NS=g1lnk...                     # rewrites clockwork -> NS and test1 -> ADMIN into build/, strips tests
 make deploy NS=g1lnk... REMOTE=https://rpc.gno.land:443 CHAINID=gnoland-1 KEY=deployer
 ```
+
+**The bootstrap authority.** The sources name the public test1 key
+(`g1jg8m...`, whose mnemonic is public) as the `Admin` constant of `core`,
+`dao` and `kourt` and as the token's genesis holder, so gnodev and the
+tests work unedited. `make build` and `make deploy` rewrite it to `ADMIN`
+(`make deploy ADMIN=g1... ...`), which defaults to `NS` when `NS` is an
+address; `make deploy` refuses a build that still names test1 on any chain
+id other than `dev`. The guardian key is therefore the deployer key unless
+`ADMIN` names another address.
 
 `scripts/deploy.sh` rebuilds `build/`, checks that the keybase holds the
 namespace address, publishes the packages in dependency order and skips
 what is already live, so it is safe to re-run after a failure. Order: the
-pure packages, `core`, `core/impl/v1`, `token`, `dao`, `dao/impl/v1`,
-`dao/exec`, `kourt`, `kourt/impl/kourtv3`. The mirror release imports the
+pure packages (including `authspec`), `core`, `core/impl/v1`, `token`,
+`kourt`, `dao`, `dao/impl/v1`, `dao/exec`, `kourt/impl/kourtv3` (the DAO
+imports `kourt`, so `kourt` goes first). The mirror release imports the
 deployed Kourt v3 realm, so the script publishes it only when the target
 chain has that realm (mainnet does) and says so otherwise. `WITH_KOURTDEV=1`
 adds the stand-in `kourtdev` and its release `kourt/impl/v1` (development
@@ -82,11 +94,14 @@ gnoracle call $KV3 TransferCC gnoracle <mirror address> 40000000 # 40 CC into th
 court-creation burn: then found the court from an account with `StartCourt
 gnoracle "Gnoracle disputes"` on the Kourt realm, sending the burn, and run
 `EnsureCourt` again. Then the genesis distribution (plan §9.1: 40% treasury, 25%
-incentives, 20% liquidity, 15% founders) with `token Transfer`, the founders'
-vesting with `dao SetVesting <member> <until> <floor>` (authority) or a
-`vesting` proposal later, and the first parameter tuning by `SetParam` while
-the guardian still holds authority (one change per parameter per block, at
-most ±50% each).
+incentives, 20% liquidity, 15% founders) with `token Transfer`, and the
+first tuning of the core's parameters with `core SetParam` while the
+guardian holds the core's authority (one change per parameter per block, at
+most ±50% each). The guardian cannot set the DAO's own parameters: they
+change only by `param` proposal (or `DevSetParam` on a development chain,
+§9). There is no direct vesting entry point either: the founders' vesting
+is set by a `vesting` proposal (payload `<member> <until> <floor>`) once
+there are members to pass it.
 `scripts/chain-test.sh` drives a whole lifecycle against gnodev and doubles
 as the deployment rehearsal checklist; `make agent-soak` then runs several
 agents and the bot against it and asserts the rounds, rewards and
@@ -95,9 +110,12 @@ suites and publishes the image; the soak needs a chain and stays manual).
 
 ### Authority handover
 
-The guardian is a single key until enough members have staked (the plan's
-threshold is `guardianHandoverMembers`, 25; the step itself is a policy the
-guardian follows, verifiable on chain). Every authority transfer is two
+The guardian is a single key until enough members have staked (the plan
+says 25; the threshold is a policy the guardian follows, not a parameter,
+and the handover itself is verifiable on chain). The realms start
+differently: `core` answers to the guardian key alone; `dao` answers to
+the guardian or its exec trampoline (`anyof`), and `kourt` to the guardian
+or the DAO (`anyof`). Every authority transfer is two
 steps seven days apart: `ProposeAuthority <spec>` records and announces the
 new authority, `ExecuteAuthority` applies it once `AuthorityTimelock` has
 passed, `CancelAuthority` drops it before that. The spec is one line:
@@ -108,18 +126,23 @@ trampoline), so a typo cannot leave a realm ungoverned.
 Handover, in order, each step proposed then executed after the delay:
 
 1. `core ProposeAuthority anyof:<guardian>|<dao path>`, then `ExecuteAuthority`
-   (both may act for the overlap); the same on `kourt`.
+   (both may act for the overlap). `kourt` already starts that way.
 2. `core ProposeAuthority realms:<dao path>` and the same on `kourt` (DAO
-   only). After the guardian is dropped, the DAO executes these through
-   `authority-transfer` and `authority-execute` proposals.
+   only), by the guardian key or by `authority-transfer <core|kourt>
+   realms:<dao path>` proposals; after the delay, `ExecuteAuthority` or an
+   `authority-execute` proposal.
 3. On the DAO, an `authority-transfer dao realms:<exec path>` proposal, then
-   after the delay an `authority-execute dao` proposal, so only the DAO's own
-   votes govern its releases from then on.
+   after the delay an `authority-execute dao realms:<exec path>` proposal,
+   so only the DAO's own votes govern its releases from then on.
 
-Each step emits `AuthorityProposed`, `AuthorityTransferred` or
-`AuthorityCancelled`; the bot posts them. Freezing a realm is refused while
-a key still holds its authority. An `authority-execute` proposal opens once
-the seven-day delay has passed, since its own execution window is limited.
+An `authority-execute` proposal's payload is `<core|dao|kourt> <spec>`, and
+the spec must equal the transfer pending on that realm, both when the
+proposal is made and when it executes, so members vote on a named
+transfer. Propose it close to the end of the seven-day delay: it has no
+timelock of its own, its execution window is limited, and it fails while
+the transfer is still timelocked. Each step emits `AuthorityProposed`,
+`AuthorityTransferred` or `AuthorityCancelled`; the bot posts them.
+Freezing a realm is refused while a key still holds its authority.
 
 ## 3. Upgrading a realm
 
@@ -154,11 +177,18 @@ Kourt v3 realm; `kourt/impl/v1` binds the stand-in for development chains,
 and a release for another Kourt generation is a new directory under
 `kourt/impl/` named after it. Each record remembers the binding it was filed
 under; a release bound elsewhere refuses to advance it, and the authority
-closes such records with `Abandon` (or a `kourt-abandon` proposal). Claims
-that die unanswered on the bound court are closed by the release itself.
+closes such records with `Abandon <dispute> <reason>` (or a `kourt-abandon
+<dispute> <reason>` proposal; the reason is required). A claim nobody
+answers for twelve weeks dies on Kourt: the release closes it there (Kourt
+burns the fee and returns the deposit), takes its stake back and records it
+as abandoned. `Invoke withdraw <dispute>` (anyone) recovers what an
+abandoned record of the live binding left on Kourt: its stake, and once
+the claim is settled the deposit, fee and answer bond. A claim that settles
+with no decision emits `KourtNoVerdict`.
 
 **The Kourt float.** `kourt:json/now` reports the mirror's court coin as
-`float` (held) and `spendable` (not staked). A claim in flight needs about
+`float` (held) and `spendable` (not staked), and `oneWay` when the court's
+coin never returns GNOT. A claim in flight needs about
 4 CC (a 1 CC deposit plus a 10% fee, a stake of twice the answerability
 floor, currently 2 CC, and the answer bond of about 6% of the stake); the
 deposit, fee and stake return when the claim settles, the bond too unless
@@ -167,8 +197,10 @@ from any account (`Buy gnoracle 0` with GNOT sent) and moving it with
 `TransferCC gnoracle <mirror address> <amount>`. `Invoke reclaim <dispute>`
 pulls the emission Kourt grants a settled claim's author, answerer and
 winning stake into the float (anyone may run it). `RedeemFloat <amount>`
-(authority) converts excess coin back to GNOT and sends it to the treasury;
-the bot posts every `FloatRedeemed`.
+(authority; after handover a `kourt-redeem <amount>` proposal) converts
+excess coin back to GNOT and sends it to the treasury; it refuses on a
+one-way court. The bot posts every `FloatRedeemed`. The mirror's pages list
+the records newest first, 50 per page (`kourt:page/<n>`).
 
 ## 4. Running the bot
 
@@ -190,7 +222,8 @@ gnoracle-bot -config bot.toml
   announced or attempted. Delete it to rescan from `start_height`.
 - **Cranks**: `finalize` (after `finalize_grace`, so the feed's own agents
   keep the tip when they are alive), `resolve` (after reveal ends, and after
-  an appeal window), `kourt` (hourly), `settle` (daily, opted-in members).
+  an appeal window), `kourt` (hourly by default, `kourt_every`), `settle`
+  (daily, opted-in members).
   Each is idempotent on chain; a lost race costs one small fee.
 - **Docker**: `make docker` locally, or pull `ghcr.io/clockworkgr/gnoracle`
   (published by CI on every push to `main` and every `v*` tag). The image
@@ -217,20 +250,24 @@ providers against gnodev; `make agent-dev` starts one.
 ## 6. Monitoring
 
 - `gnoracle health`: both realms' conservation checks. Anything other than
-  `ok` is an incident (§8).
+  `ok` is an incident (§8). The DAO's `json/health` is an object: besides
+  its balances and what it owes, it reports `pendingMemberPyth`,
+  `reservedPyth` (credited member rewards the treasury backs) and
+  `treasuryPythFree` (the treasury PYTH a proposal may spend; `treasury`
+  proposals spend only this).
 - `gnoracle feed <id>`: `status`, `activeCount`, `lastFinalized` against
   `currentRound`, `openDisputes`, `pool`. A feed whose `lastFinalized` lags
   `currentRound` by more than two rounds has no live cranker.
 - `gnoracle providers <id>`: `consecutiveMisses`, `strikes`, `status`.
 - `gnoracle disputes` and `gnoracle ballot <id>`: phases and deadlines.
 - gnoweb pages: `core:feeds`, `core:disputes`, `core:health`, `dao:members`,
-  `dao:proposals`, `kourt`.
+  `dao:proposals`, `dao:health`, `kourt` (paged, `kourt:page/<n>`).
 - The bot's channel is the human-readable event log; `bot-state.json`'s
   `height` should track the chain head.
 
 Realm events worth alerting on outside the bot: `ProviderJailed`,
-`FeedUnfunded`, `KourtDissent`, `PenaltyCapped`, `Frozen`,
-`AuthorityTransferred`.
+`FeedUnfunded`, `KourtDissent`, `KourtNoVerdict`, `PenaltyCapped`,
+`RewardShortfall`, `Frozen`, `AuthorityTransferred`.
 
 ## 7. Keys and gas
 
@@ -254,7 +291,15 @@ Realm events worth alerting on outside the bot: `ProviderJailed`,
 
 ## 8. Incidents
 
-**`health` is not `ok`.** The realm's held balances disagree with its
+**`health` reads `SHORTFALL`** (DAO only). The members' credited PYTH
+rewards that the penalty pool does not cover exceed the treasury's PYTH;
+the ledgers are intact, but `RewardShortfall` events report members paid
+less than they were credited. Refill the treasury's PYTH: any PYTH sent
+to the DAO's address beyond what it owes counts as treasury (a token
+transfer, or a `mint` proposal to the DAO's address within the yearly
+cap).
+
+**`health` reads `BROKEN`.** The realm's held balances disagree with its
 account. Stop accepting new releases, capture `gnoracle health` output and
 the last blocks' events, and compare against the money primitives in
 `core/money.gno` and `dao/money.gno`. Every transfer goes through them; a
@@ -265,7 +310,17 @@ new.
 bot's `finalize` crank does this). Nobody submitted: check the providers'
 agents; misses are slashed automatically at the next finalisation and the
 alerter half goes to whoever finalises. Unfunded (`FeedUnfunded`): the
-subscription ran out; a sponsor renews or the DAO deprecates.
+pool holds less than one round's drip; rounds keep running, paid from what
+remains, without miss slashes, and the feed returns to active once
+funding (a sponsor's renewal or a realm subscription) covers the drip
+again. A recurring feed with `deadFeedRounds` (168) consecutive rounds
+without a value retires by itself at finalisation: its pool goes to the
+fees and its providers are unseated and start unbonding.
+
+**Pruning a retired feed.** After `retentionAfterDeprecate` and once its
+rounds are pruned, `PruneFeed <id>` removes the feed's index entries 256 per
+call: a large feed takes several calls, each emitting `FeedPruning`, until
+`FeedPruned`.
 
 **A provider is jailed.** They fix the source, wait `jailCooldown` (24 h),
 top up to the feed's minimum if slashed below it, and `gnoracle unjail <id>`.
@@ -295,20 +350,25 @@ handover early (§2).
 `gnoracle params` and `gnoracle params dao` print every parameter with its
 bounds; each change is limited to ±50% per call (`MaxChangeBps`; the bounds
 themselves and one-unit steps are always allowed) and to one change per
-parameter per block, and after handover goes through a `param` proposal
+parameter per block. The guardian's `SetParam`/`SetParamStr` reach the
+core's parameters only; the DAO's change by `param` proposal
 (`core.<name>=<value>` or `dao.<name>=<value>`; strings as
-`core.<name>=str:<text>`). Appendix C of the plan is generated from the
-registries (`scripts/gen-appendices.py`).
+`core.<name>=str:<text>`), which is also how the core's change after
+handover. A proposal's value is checked against the bounds and the change
+limit when it is made, and again when it executes. `dao.epochBlocks` is
+fixed and cannot be changed at all. Appendix C of the plan is generated
+from the registries (`scripts/gen-appendices.py`).
 
 **Development chains.** On a chain whose id is `dev` (gnodev; no public
 network) a few timing floors are lower so that `make demo` and upgrade
 rehearsals fit in minutes: `appealWindow` down to 10 s on the core;
 `commitPeriod`, `revealPeriod` and their round-2 variants down to 30 s,
-`epochBlocks` down to 10 (fixed at 720 elsewhere), `upgradeTimelock` to
-30 s and `executionWindow` to 60 s on the DAO. The DAO's own parameters
-change there with `DevSetParam <name> <value>` (authority; still rate
-limited), an entry point that refuses on every other chain id. Defaults are
-identical on every chain; Appendix C lists the relaxed bounds.
+`upgradeTimelock` to 30 s and `executionWindow` to 60 s on the DAO. The
+DAO's own parameters change there with `DevSetParam <name> <value>`
+(authority; still rate limited), an entry point that refuses on every other
+chain id. Those defaults are identical on every chain; Appendix C lists the
+relaxed bounds. The one exception is `epochBlocks`, which is 10 on chain id
+`dev` from genesis (720 elsewhere) and changes on neither.
 
 ## 10. Backups and records
 

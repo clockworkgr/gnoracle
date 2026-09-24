@@ -50,7 +50,7 @@ const (
 type Rules struct {
 	QuorumBps        int64 // revealed weight (abstain included) over obligated weight
 	DecisionBps      int64 // share of UPHOLD + OVERTURN(+MINOR) a side needs
-	MaxVoterShareBps int64 // largest share of revealed weight one address may hold
+	MaxVoterShareBps int64 // largest share of the obligated (sealed) weight one address's revealed weight may count for; the excess is clipped
 	MajorRequested   bool  // whether OVERTURN_MINOR is a valid choice
 }
 
@@ -256,12 +256,10 @@ func Decide(w Weights, obligated int64, r Rules) Result {
 		res.Outcome = OutcomeUphold
 	case geMul(overturn, Bps, sides, r.DecisionBps):
 		res.Outcome = OutcomeOverturn
+		// major only when it was asked for and outweighs minor
+		res.Tier = TierMinor
 		if r.MajorRequested && w.Overturn > w.OverturnMinor {
 			res.Tier = TierMajor
-		} else if r.MajorRequested {
-			res.Tier = TierMinor
-		} else {
-			res.Tier = TierMinor
 		}
 	}
 	return res

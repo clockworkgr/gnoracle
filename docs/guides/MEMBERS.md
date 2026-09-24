@@ -14,11 +14,14 @@ gnoracle member <your address>                   # staked, power, feesOwed, curs
 ```
 
 Voting power is your stake checkpointed at the start of the next epoch (720
-blocks), so stake before a dispute you want to vote on, not after.
+blocks, fixed), so stake before a dispute you want to vote on, not after.
 `gnoracle unstake <pyth>` starts the 7-day cooldown; `gnoracle dao-withdraw`
-pays out after it. A partial unstake must leave at least 1 PYTH staked, and a second unstake waits until the first is withdrawn.
-Founder allocations carry a vesting floor set by the authority or a
-`vesting` proposal; the floor cannot be unstaked before its date.
+pays out after it. A partial unstake must leave at least 1 PYTH
+(`minStake`) staked, and a second unstake waits until the first is
+withdrawn. Staking again after penalties or a full unstake must bring the
+stake to at least `minStake`.
+Founder allocations carry a vesting floor set only by a `vesting`
+proposal; the floor cannot be unstaked before its date.
 
 ## Fees and rewards
 
@@ -60,11 +63,15 @@ Choices:
 
 The decision needs 33% of obligated weight revealed and 60% of the weight
 on the two sides (UPHOLD against OVERTURN and OVERTURN_MINOR together; VOID
-and ABSTAIN count for quorum, not for this bar) behind one side; a strict
-majority of everything revealed can VOID instead. Otherwise the ballot rolls
-to a 48 h + 24 h second round with 25% and 55%. The heaviest voters are clipped at 20% of obligated
-weight when deciding, so no single staker decides alone. A decided round
-can be appealed within 24 h for twice the bond; the appeal round is final.
+and ABSTAIN count for quorum, not for this bar) behind one side; VOID wins
+instead when it holds a strict majority of the revealed weight other than
+ABSTAIN. Otherwise the ballot rolls to a 48 h + 24 h second round with 25%
+and 55%; a second round that decides nothing voids the dispute. The
+heaviest voters are clipped at 20% of obligated weight when deciding, so no
+single staker decides alone. A decided round can be appealed within 24 h
+for twice the bond; the appeal round is final. An appealed first round
+settles like a rolled one: no rewards and no incoherence penalty, only the
+absence and abstention penalties, which go to the treasury.
 
 ## Penalties
 
@@ -77,11 +84,14 @@ can be appealed within 24 h for twice the bond; the appeal round is final.
 Penalties are applied lazily: `gnoracle settle` (or the bot, for opted-in
 members) walks your resolved ballots once the core has applied each
 outcome and applies penalties and rewards. Staking and unstaking are not
-blocked by a running ballot; withdrawing unbonded stake waits for ballots
-you hold weight in.
-Coherent voters share 30% of forfeited bonds and slashes plus the DAO's
-voter fund. Once a member hits the 30-day cap, `PenaltyCapped` is emitted
-and no more is taken that window.
+blocked by a running ballot; withdrawing unbonded stake waits until every
+ballot you hold weight in is final, which includes a ballot that has
+resolved but whose outcome the core has not applied yet.
+Coherent voters share, by revealed weight, the voters' 30% of forfeited
+bonds and slashes (ugnot) and the PYTH penalties of the members who were
+absent or voted against the outcome. The 30-day cap window is keyed to
+when each ballot resolved, not to when you settle; once a member hits the
+cap, `PenaltyCapped` is emitted and no more is taken that window.
 
 ## Proposals
 
@@ -89,19 +99,30 @@ and no more is taken that window.
 gnoracle proposal 3
 gnoracle vote 3 yes
 gnoracle execute 3                               # after the timelock, anyone
-gnoracle propose param "core.subscriberFloor=5000" "Raise the subscriber floor" 20gnot
+gnoracle propose param "core.subscriberFloor=3000" "Raise the subscriber floor" 20gnot
 ```
+
+A parameter moves at most 50% per change (`subscriberFloor`, 2000 ugnot by
+default, can go to 3000 at most in one proposal); the payload is checked
+against the bounds when the proposal is made.
 
 Kinds: `feed-accept`, `feed-update`, `feed-deprecate`, `provider-remove`,
 `param`, `treasury`, `mint`, `upgrade-accept`, `upgrade-rollback`, `freeze`,
 `authority-transfer`, `authority-execute`, `authority-cancel` (each of the
-last six names `core`, `dao` or `kourt`; an authority transfer executes in a
-second proposal after the realm's seven-day delay), `trusted-requester`,
-`vesting`, `kourt-abandon`, `text`. Each has its own
-quorum, threshold, voting period and timelock (plan §8.3); a proposal carries
-when strictly more than the bar votes yes. To open one you hold 0.25% of the
+last six names `core`, `dao` or `kourt`), `trusted-requester`, `vesting`
+(`<member> <until> <floor>`), `kourt-abandon` (`<dispute> <reason>`, the
+reason is required), `kourt-redeem` (`<amount>` of the mirror's court coin
+back to GNOT for the treasury), `kourt-attribution` (`<text>`, the Kourt
+attribution notice), `text`. An authority transfer executes in a second
+proposal after the realm's seven-day delay: `authority-execute <core|dao|kourt>
+<spec>`, where the spec must equal the transfer pending on that realm when
+the proposal is made and when it executes. Each kind has its own quorum,
+threshold, voting period and timelock (plan §8.3); a proposal carries when
+strictly more than the bar votes yes. To open one you hold 0.25% of the
 staked supply or attach a 20 GNOT deposit, refunded when the vote reaches
-quorum and forfeited to the treasury when it does not.
+quorum and forfeited to the treasury when it does not. A proposer who
+cancels a proposal (`Cancel`, before voting ends) forfeits the deposit to
+the treasury as well.
 
 ## Reminders and settlement by the bot
 

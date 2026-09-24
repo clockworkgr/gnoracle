@@ -1,8 +1,7 @@
 // Package impl is the first implementation of the Gnoracle DAO: staking with
-// checkpointed voting power, fee sharing, governance proposals and the member
-// settlement that applies dispute penalties and rewards. Opening and tallying
-// dispute ballots arrives with the disputes release; settlement is here so
-// the first ballots can be processed by this code or its successor alike.
+// checkpointed voting power, fee sharing, governance proposals, the dispute
+// ballots (commit, reveal, tally, appeal) and the member settlement that
+// applies their penalties and rewards.
 package impl
 
 import (
@@ -38,11 +37,18 @@ func i(v int64) string { return strconv.FormatInt(v, 10) }
 func (*implV1) Stake(_ int, rlm realm, member address, amount int64) {
 	st := dao.Store(0, rlm)
 	m := dao.GetMember(member)
-	if m == nil && amount < param("minStake") {
-		panic("dao: stake at least " + i(param("minStake")) + " base units")
-	}
 	if m != nil {
 		settle(st, m, param("settleMaxN"), true)
+	}
+	// a position (new, emptied, or penalised below the minimum) must end at
+	// least at the minimum: dust positions would let the fee accumulator's
+	// per-share value run away
+	staked := int64(0)
+	if m != nil {
+		staked = m.Staked
+	}
+	if amount <= 0 || staked+amount < param("minStake") {
+		panic("dao: stake at least " + i(param("minStake")) + " base units in total")
 	}
 	st.MemberStake(member, amount)
 }
@@ -82,18 +88,19 @@ func (*implV1) Withdraw(_ int, rlm realm, member address) int64 {
 	}
 	settle(st, m, param("settleMaxN"), true)
 	if seq := openObligation(m); seq != 0 {
-		panic("dao: ballot " + u(seq) + " still obligates this stake; withdraw after it resolves")
+		panic("dao: ballot " + u(seq) + " still obligates this stake; withdraw after its outcome is applied")
 	}
 	return st.MemberPayUnbonded(member)
 }
 
-// openObligation returns an unresolved ballot the member holds weight in,
-// or 0. Ballots below the cursor are resolved by construction.
+// openObligation returns a ballot the member holds weight in that is not
+// final yet (still running, or decided but not applied by the core), or 0.
+// Ballots below the cursor are settled by construction.
 func openObligation(m *dao.Member) uint64 {
 	total := dao.BallotCount()
 	for seq := m.Cursor + 1; seq <= total; seq++ {
 		b := dao.GetBallot(seq)
-		if b == nil || b.Phase == dao.BallotResolved {
+		if b == nil || (b.Phase == dao.BallotResolved && b.Final) {
 			continue
 		}
 		if dao.PowerAt(m.Addr, b.SealedEpoch) > 0 {
@@ -103,8 +110,8 @@ func openObligation(m *dao.Member) uint64 {
 	return 0
 }
 
-// SettleMember processes up to maxN resolved ballots for a member. The caller
-// earns a tip from the penalties it settles.
+// SettleMember processes up to maxN final ballots for a member. Anyone may
+// run it.
 func (*implV1) SettleMember(_ int, rlm realm, member address, maxN int64) int64 {
 	st := dao.Store(0, rlm)
 	m := dao.GetMember(member)
@@ -170,7 +177,11 @@ func settle(st *dao.StateRef, m *dao.Member, maxN int64, strict bool) int64 {
 		if w <= 0 {
 			continue
 		}
-		res := tally.Result{Outcome: tally.Outcome(b.Outcome), Tier: b.Tier, Quorate: b.Outcome != string(tally.OutcomeRoll),
+		outcome := tally.Outcome(b.Outcome)
+		if b.Appealed {
+			outcome = tally.OutcomeRoll // round 2 decides; round 1 settles like a roll
+		}
+		res := tally.Result{Outcome: outcome, Tier: b.Tier, Quorate: outcome != tally.OutcomeRoll,
 			Revealed: b.Revealed, Obligated: b.Obligated,
 			Weights: tally.Weights{Uphold: b.Uphold, Overturn: b.Overturn, OverturnMinor: b.OverturnMinor, Void: b.Void, Abstain: b.Abstain}}
 		rev := dao.RevealOf(seq, m.Addr)
@@ -182,12 +193,18 @@ func settle(st *dao.StateRef, m *dao.Member, maxN int64, strict bool) int64 {
 		class := tally.Classify(revealed, choice, res)
 		switch class {
 		case tally.ClassCoherent:
+			// the coherent weight was summed from the revealed weights, so a
+			// share is paid on the weight the member revealed with (never
+			// more), or the pool could be overpaid
+			if rw := revealedWeight(rev); rw < w {
+				w = rw
+			}
 			pyth := tally.RewardShare(b.ExpectedPool, w, b.CoherentWeight)
 			ugnot := tally.RewardShare(b.BondShareUgnot, w, b.CoherentWeight)
 			st.MemberCreditReward(m.Addr, pyth, ugnot)
 		case tally.ClassAbsent, tally.ClassAbstained, tally.ClassIncoherent:
 			penalty := tally.Penalty(w, class, rates)
-			penalty = capPenalty(st, m, penalty)
+			penalty = capPenalty(st, m, penalty, b.ResolvedAt)
 			if penalty > 0 {
 				// a ballot without coherent voters (a rolled round) has no
 				// claimant for its penalties: they go to the treasury
@@ -209,9 +226,11 @@ func settle(st *dao.StateRef, m *dao.Member, maxN int64, strict bool) int64 {
 	return done
 }
 
-// capPenalty applies the per-window penalty cap and records the window.
-func capPenalty(st *dao.StateRef, m *dao.Member, penalty int64) int64 {
-	t := now()
+// capPenalty applies the per-window penalty cap and records the window. The
+// window is keyed on when the ballot resolved, not on when the member is
+// settled, so settling late neither resets nor stretches the cap.
+func capPenalty(st *dao.StateRef, m *dao.Member, penalty int64, resolvedAt int64) int64 {
+	t := resolvedAt
 	window := param("penaltyWindow")
 	at, inWindow := m.PenaltyWindowAt, m.PenaltyInWindow
 	if t-at >= window {
@@ -227,6 +246,19 @@ func capPenalty(st *dao.StateRef, m *dao.Member, penalty int64) int64 {
 	}
 	st.MemberSetPenaltyWindow(m.Addr, at, inWindow+penalty)
 	return penalty
+}
+
+// revealedWeight reads the weight of a "choice|weight" reveal (0 if none).
+func revealedWeight(rev string) int64 {
+	k := indexByte(rev, '|')
+	if k >= len(rev) {
+		return 0
+	}
+	w, err := strconv.ParseInt(rev[k+1:], 10, 64)
+	if err != nil || w < 0 {
+		return 0
+	}
+	return w
 }
 
 func indexByte(s string, c byte) int {

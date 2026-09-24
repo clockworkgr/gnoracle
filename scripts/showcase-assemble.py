@@ -309,7 +309,7 @@ w("`gnoracle health` renders both permanent realms' `Health()`: every ugnot the 
 for l in health_lines[:2]:
     try:
         o = json.loads(l)
-        inner = json.loads(o["health"])
+        inner = json.loads(o["health"]) if isinstance(o["health"], str) else o["health"]
         w(fence(json.dumps(inner, indent=2), "json"))
     except Exception:
         w(fence(l))

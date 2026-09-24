@@ -215,7 +215,8 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	f = core.GetFeed(id)
 	uassert.True(t, f.HaveValue)
 	uassert.Equal(t, uint64(0), f.LastFinalized)
-	// the round's value is not public state: a subscribed realm reads it
+	// a subscribed realm reads the round's value through ReadRound (the
+	// public getters do not carry it; the pages show it to people)
 	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	rv, rtier, _ := core.ReadRound(cross(cur), id, 0)
 	uassert.Equal(t, int64(1_005_000), rv) // lower median of 3 is the middle value
@@ -235,10 +236,17 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, f.StartAt, at)
 	uassert.Equal(t, "consensus", tier)
 	uassert.Equal(t, int64(1*gnot), core.GetSubscription(id, readerPath).Paid)
-	// another realm is still refused, and the page shows the value to everyone
+	// another realm is still refused, and cannot read the value off the pages
+	// either (they serve people and off-chain readers); a person sees it
 	testing.SetRealm(testing.NewCodeRealm("gno.land/r/demo/other"))
 	uassert.AbortsContains(t, cur, "not subscribed", func() { core.Read(cross(cur), id) })
+	uassert.False(t, strings.Contains(core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10)), "1.005000"))
+	uassert.False(t, strings.Contains(core.Render(cross(cur), "json/feed/"+strconv.FormatUint(id, 10)), "1005000"))
+	uassert.True(t, strings.Contains(core.Render(cross(cur), "json/feed/"+strconv.FormatUint(id, 10)), "realms read values through Read"))
+	testing.SetRealm(testing.NewUserRealm(stranger))
+	nosend()
 	uassert.True(t, strings.Contains(core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10)), "1.005000"))
+	uassert.True(t, strings.Contains(core.Render(cross(cur), "json/feed/"+strconv.FormatUint(id, 10)), "1005000"))
 
 	// --- round 1: only alice submits; window closes; anyone finalises
 	skip(3600)
@@ -286,6 +294,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 
 	// --- the page shows the value at once (chain state is public); after the
 	// dispute window the value is final, and ReadFinal serves it
+	testing.SetRealm(testing.NewUserRealm(stranger))
 	rendered := core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10))
 	uassert.True(t, strings.Contains(rendered, "1.200000"))
 	testing.SetRealm(testing.NewCodeRealm(readerPath))
@@ -299,6 +308,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, int64(1_200_000), fv)
 	uassert.Equal(t, uint64(2), fr)
 	uassert.Equal(t, "final", ftier)
+	testing.SetRealm(testing.NewUserRealm(stranger))
 	rendered = core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10))
 	uassert.True(t, strings.Contains(rendered, "1.200000"))
 

@@ -16,7 +16,6 @@ package dao
 
 import (
 	"chain/runtime"
-	"chain/runtime/unsafe"
 	"strconv"
 	"strings"
 
@@ -94,7 +93,7 @@ type DAO interface {
 	Vote(_ int, rlm realm, voter address, proposalID uint64, choice string)
 	Execute(_ int, rlm realm, caller address, proposalID uint64)
 	Cancel(_ int, rlm realm, caller address, proposalID uint64)
-	// dispute ballots (served from a later release)
+	// dispute ballots
 	OpenDisputeVote(_ int, rlm realm, disputeID uint64, majorRequested bool, summary string) uint64
 	CommitVote(_ int, rlm realm, voter address, disputeID uint64, commitment string)
 	RevealVote(_ int, rlm realm, voter address, disputeID uint64, choice, salt string)
@@ -233,7 +232,7 @@ func Forget(cur realm) { proxy.Forget(0, cur) }
 func Freeze(cur realm) {
 	proxy.AssertAuthorized(0, cur)
 	if !strings.HasPrefix(proxy.Authority().String(), "realms:") {
-		panic("dao: hand the authority to the exec trampoline (TransferAuthorityToExec) before freezing")
+		panic("dao: hand the authority to the exec trampoline (an `authority-transfer dao realms:" + ExecPath + "` proposal) before freezing")
 	}
 	proxy.Freeze(0, cur)
 	emit("Frozen", "realm", "dao")
@@ -327,7 +326,7 @@ func Invoke(cur realm, method, args string) string {
 	prev := cur.Previous()
 	sent := int64(0)
 	if prev.IsUserCall() {
-		sent = unsafe.OriginSend().AmountOf(FeeDenom)
+		sent = originSend()
 	}
 	return live().Invoke(0, cur, prev.Address(), prev.IsUserCall(), sent, method, args)
 }

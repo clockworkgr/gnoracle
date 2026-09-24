@@ -17,8 +17,12 @@
 //   - an undisputed answer settles 72 h after it was posted; a disputed one
 //     is decided by a one-week coin vote, then held in escrow (at least one
 //     more week, reopenable by a new dispute) before Finalize;
-//   - a claim nobody answers for twelve weeks dies; its stake is taken back
-//     and the record is closed as abandoned.
+//   - a new claim has a polish window (the court's stake-open delay) before
+//     anyone may stake; the mirror waits it out;
+//   - a claim nobody answers for twelve weeks dies; the mirror closes it on
+//     Kourt, takes its stake back and records it as abandoned;
+//   - a holder may answer before the mirror stakes, which freezes staking;
+//     the mirror then follows the claim to its verdict without a position.
 //
 // Every wait is measured on Kourt's own clock (ClaimTimeline), so the mirror
 // also follows a test clock armed on a development chain.
@@ -53,7 +57,8 @@ const (
 	answerWindow       = 3 * epochBlocks // blocks of stake history an answer needs
 	settleSecs         = int64(72 * 3600)
 	priorityWindowSecs = int64(24 * 3600)
-	blockSecs          = int64(5) // Kourt's blocks-to-seconds ratio
+	deadClaimSecs      = int64(12 * 7 * 86400) // an unanswered claim dies after this
+	blockSecs          = int64(5)              // Kourt's blocks-to-seconds ratio
 	ordAnswerXFloorBps = int64(10)
 
 	// stakeMultiple is how many answerability floors the mirror stakes, so
@@ -116,10 +121,14 @@ func spendable() int64 {
 	return kv.SpendableOf(kourt.CourtSlug, kourt.Address())
 }
 
-// Redeem converts court coin back to GNOT (the DAO's court is two-way) and
-// forwards the proceeds to the treasury.
+// Redeem converts court coin back to GNOT and forwards the proceeds to the
+// treasury. Only a two-way court redeems; whoever founded the court under the
+// slug chose, and the page and JSON view say which it is.
 func (*implKourtV3) Redeem(_ int, rlm realm, amount int64) int64 {
 	st := kourt.Store(0, rlm)
+	if kv.Exists(kourt.CourtSlug) && kv.CourtOneWay(kourt.CourtSlug) {
+		panic("kourt: court '" + kourt.CourtSlug + "' on " + kourtPath + " is one-way: its coin never returns GNOT, so the float cannot be redeemed")
+	}
 	payout := kv.Redeem(cross(rlm), kourt.CourtSlug, amount)
 	if payout > 0 {
 		st.SendToTreasury(payout)
@@ -132,10 +141,11 @@ func (*implKourtV3) Redeem(_ int, rlm realm, amount int64) int64 {
 // clock is a claim's timeline as Kourt reports it: instants and heights on
 // Kourt's own clock, which a development chain may fabricate.
 type clock struct {
-	openedT, openedH     int64
-	answeredT, answeredH int64
-	reopenT, reopenH     int64 // escrow end of a provisional verdict
-	nowT, nowH           int64
+	openedT, openedH       int64
+	answeredT, answeredH   int64
+	reopenT, reopenH       int64 // escrow end of a provisional verdict
+	voteCloseT, voteCloseH int64 // close of the open dispute vote (time 0: gated on height)
+	nowT, nowH             int64
 }
 
 func claimClock(claimID uint64) clock {
@@ -157,6 +167,8 @@ func claimClock(claimID uint64) clock {
 			c.answeredT, c.answeredH = t, h
 		case "reopen":
 			c.reopenT, c.reopenH = t, h
+		case "voteclose":
+			c.voteCloseT, c.voteCloseH = t, h
 		case "now":
 			c.nowT, c.nowH = t, h
 		}
@@ -194,6 +206,19 @@ func (*implKourtV3) Crank(_ int, rlm realm, disputeID uint64) string {
 		if kv.ClaimClosed(slug, rec.ClaimID) {
 			return abandon(st, rlm, rec, t)
 		}
+		c := claimClock(rec.ClaimID)
+		if kv.HasAnswer(slug, rec.ClaimID) {
+			// a holder answered before the mirror staked: staking is frozen,
+			// so the mirror follows the claim to its verdict without a position
+			st.Set(disputeID, kourt.StateAnswered, 0, c.answeredT, 0, "", 0)
+			return kourt.StateAnswered
+		}
+		if c.nowT >= c.openedT+deadClaimSecs {
+			return closeDead(st, rlm, rec, t)
+		}
+		if c.nowT < c.openedT+kv.CourtStakeOpenDelay(slug)*blockSecs {
+			return rec.State // the polish window: staking has not started
+		}
 		amount := stakeSize()
 		kv.Stake(cross(rlm), slug, rec.ClaimID, sideYES, amount)
 		st.Set(disputeID, kourt.StateStaked, 0, t, 0, "", amount)
@@ -202,11 +227,14 @@ func (*implKourtV3) Crank(_ int, rlm realm, disputeID uint64) string {
 		// anyone may answer once the claim is answerable; a foreign answer
 		// is recorded rather than fought, and finish judges the verdict
 		if kv.HasAnswer(slug, rec.ClaimID) {
-			st.Set(disputeID, kourt.StateAnswered, 0, t, 0, "", 0)
+			st.Set(disputeID, kourt.StateAnswered, 0, claimClock(rec.ClaimID).answeredT, 0, "", 0)
 			return kourt.StateAnswered
 		}
 		if kv.ClaimClosed(slug, rec.ClaimID) {
 			return abandon(st, rlm, rec, t)
+		}
+		if c := claimClock(rec.ClaimID); c.nowT >= c.openedT+deadClaimSecs {
+			return closeDead(st, rlm, rec, t)
 		}
 		if !answerable(st, rlm, rec) {
 			return kourt.StateStaked
@@ -233,8 +261,7 @@ func (*implKourtV3) Crank(_ int, rlm realm, disputeID uint64) string {
 		}
 		c := claimClock(rec.ClaimID)
 		if kv.DisputeOpen(slug, rec.ClaimID) {
-			closes := kv.DisputeVoteCloses(slug, rec.ClaimID)
-			if closes == 0 || c.nowH < closes {
+			if !voteClosed(c, rec.ClaimID) {
 				return rec.State // the vote is open
 			}
 			kv.ResolveDispute(cross(rlm), slug, rec.ClaimID)
@@ -254,6 +281,20 @@ func (*implKourtV3) Crank(_ int, rlm realm, disputeID uint64) string {
 		return rec.State
 	}
 	return kourt.GetRecord(disputeID).State
+}
+
+// voteClosed reports whether the open dispute vote has reached its close on
+// Kourt's clock: its governor closes on wall time when the proposal carries a
+// closing instant, on height otherwise.
+func voteClosed(c clock, claimID uint64) bool {
+	if c.voteCloseT != 0 {
+		return c.nowT >= c.voteCloseT
+	}
+	closes := c.voteCloseH
+	if closes == 0 {
+		closes = kv.DisputeVoteCloses(kourt.CourtSlug, claimID)
+	}
+	return closes != 0 && c.nowH >= closes
 }
 
 // answerFloor approximates Kourt's answerability floor for the court:
@@ -287,10 +328,12 @@ func answerable(st *kourt.StateRef, rlm realm, rec *kourt.Record) bool {
 		}
 		top := int64(1)
 		if avg < floor {
-			top = 3*(floor-avg) + 3 // the average moves by a third of what the pool gains
+			// aim at the stake the mirror sizes for (the average moves by a
+			// third of what the pool gains), not at the bare floor
+			top = 3*(stakeMultiple*floor-avg) + 3
 		}
 		kv.Stake(cross(rlm), slug, rec.ClaimID, sideYES, top)
-		st.Set(rec.Dispute, kourt.StateStaked, 0, now(), 0, "", rec.Stake+top)
+		st.Set(rec.Dispute, kourt.StateStaked, 0, rec.StakedAt, 0, "", rec.Stake+top)
 		avg, mature = kv.TrailingOI(slug, rec.ClaimID, answerWindow)
 		if !mature || avg < floor {
 			return false
@@ -303,6 +346,14 @@ func answerable(st *kourt.StateRef, rlm realm, rec *kourt.Record) bool {
 		}
 	}
 	return true
+}
+
+// closeDead closes a claim that passed Kourt's dead-claim timeout without an
+// answer (anyone may; Kourt returns the deposit to the author and burns the
+// fee), then abandons the record.
+func closeDead(st *kourt.StateRef, rlm realm, rec *kourt.Record, t int64) string {
+	kv.CloseDeadClaim(cross(rlm), kourt.CourtSlug, rec.ClaimID)
+	return abandon(st, rlm, rec, t)
 }
 
 // abandon closes the record of a claim that died unanswered on Kourt and
@@ -343,6 +394,11 @@ func finish(st *kourt.StateRef, rlm realm, rec *kourt.Record, t int64) string {
 		state = kourt.StateConfirmed
 	}
 	st.Set(rec.Dispute, state, 0, t, verdict, route, 0)
+	if verdict < 0 {
+		// closed without a decision (failed dispute rounds or a spam
+		// discard): settled, but nothing on Kourt agreed with the DAO
+		st.Emit("KourtNoVerdict", "dispute", u(rec.Dispute), "claim", u(rec.ClaimID), "route", route)
+	}
 	return state
 }
 
@@ -368,46 +424,94 @@ func finalValue(d *core.DisputeRecord) int64 {
 	return d.PriorValue
 }
 
-// body is the JSON record (at most 2000 characters).
+// body is the JSON record (at most 2000 bytes): a long evidence string, then
+// a long feed name, is cut to fit, and the record then says it was truncated.
 func body(d *core.DisputeRecord) string {
-	f := core.GetFeed(d.Feed)
 	name := ""
-	if f != nil && f.Spec != nil {
+	if f := core.GetFeed(d.Feed); f != nil && f.Spec != nil {
 		name = f.Spec.Name
 	}
-	var b strings.Builder
-	b.WriteString(`{"dispute":` + u(d.ID) + `,"feed":` + u(d.Feed) + `,"feedName":` + strconv.Quote(name) +
-		`,"round":` + u(d.Round) + `,"outcome":` + strconv.Quote(d.Outcome) + `,"tier":` + strconv.Quote(d.TierDecided) +
-		`,"priorValue":` + strconv.FormatInt(d.PriorValue, 10) + `,"proposedValue":` + strconv.FormatInt(d.ProposedValue, 10) +
-		`,"disputer":` + strconv.Quote(string(d.Disputer)) + `,"bond":` + strconv.FormatInt(d.Bond, 10) +
-		`,"slashed":` + strconv.FormatInt(d.Slashed, 10) + `,"coherentWeight":` + strconv.FormatInt(d.CoherentW, 10) +
-		`,"ballotRound":` + strconv.FormatInt(d.BallotRound, 10) + `,"evidenceHash":` + strconv.Quote(d.EvidenceHash) +
-		`,"resolvedAt":` + strconv.FormatInt(d.ResolvedAt, 10) + `,"source":` + strconv.Quote(core.SelfPath()+":dispute/"+u(d.ID)) + `}`)
-	s := b.String()
-	if len(s) > 2000 {
-		s = s[:2000]
+	ev := d.EvidenceHash
+	cut := false
+	for {
+		o := jsonw.New().Uint("dispute", d.ID).Uint("feed", d.Feed).Str("feedName", name).Uint("round", d.Round).
+			Str("outcome", d.Outcome).Str("tier", d.TierDecided).Int("priorValue", d.PriorValue).Int("proposedValue", d.ProposedValue).
+			Str("disputer", string(d.Disputer)).Int("bond", d.Bond).Int("slashed", d.Slashed).Int("coherentWeight", d.CoherentW).
+			Int("ballotRound", d.BallotRound).Str("evidenceHash", ev).Int("resolvedAt", d.ResolvedAt).
+			Str("source", core.SelfPath()+":dispute/"+u(d.ID))
+		if cut {
+			o.Bool("truncated", true)
+		}
+		s := o.String()
+		if len(s) <= 2000 || (ev == "" && name == "") {
+			return s
+		}
+		cut = true
+		if ev != "" {
+			ev = ev[:len(ev)/2]
+		} else {
+			name = name[:len(name)/2]
+		}
 	}
-	return s
 }
 
 func u(v uint64) string { return strconv.FormatUint(v, 10) }
 
 // ---- operations beyond the mirror API
 
-// Invoke serves `reclaim <dispute>`: it pulls the emission slices Kourt
-// grants a settled claim's winning stake, author and answerer into the
-// float. Anyone may run it; it mints nothing when nothing is due.
+// Invoke serves two operations; anyone may run either, since each only moves
+// coin Kourt owes this realm into the float:
+//
+//   - `reclaim <dispute>` pulls the emission slices Kourt grants a settled
+//     claim's winning stake, author and answerer; it mints nothing when
+//     nothing is due;
+//   - `withdraw <dispute>` recovers what an abandoned record of this binding
+//     left on Kourt: the stake (withdrawn after a verdict, unstaked while the
+//     claim has no answer) and, once the claim is settled, the deposit, fee
+//     and answer bond the draw returns to its author.
 func (*implKourtV3) Invoke(_ int, rlm realm, caller address, method, args string) string {
 	kourt.Store(0, rlm)
 	switch method {
-	case "reclaim":
+	case "reclaim", "withdraw":
 		id, err := strconv.ParseUint(strings.TrimSpace(args), 10, 64)
 		if err != nil {
-			panic("kourt: usage: reclaim <dispute>")
+			panic("kourt: usage: " + method + " <dispute>")
+		}
+		if method == "withdraw" {
+			return withdraw(0, rlm, id)
 		}
 		return reclaim(0, rlm, id)
 	}
 	panic("kourt: unknown method " + method)
+}
+
+func withdraw(_ int, rlm realm, disputeID uint64) string {
+	rec := kourt.GetRecord(disputeID)
+	if rec == nil || rec.Binding != binding || rec.ClaimID == 0 {
+		panic("kourt: no claim for dispute " + u(disputeID) + " in " + binding)
+	}
+	if rec.State != kourt.StateAbandoned {
+		panic("kourt: record " + u(disputeID) + " is " + rec.State + "; withdraw serves abandoned records (crank the others)")
+	}
+	slug, me := kourt.CourtSlug, kourt.Address()
+	settled := kv.Settled(slug, rec.ClaimID)
+	var withdrawn, unstaked int64
+	opened := false
+	if s := kv.StakeOf(slug, rec.ClaimID, sideYES, me); s > 0 {
+		switch {
+		case settled:
+			withdrawn = kv.WithdrawStake(cross(rlm), slug, rec.ClaimID, sideYES)
+		case !kv.HasAnswer(slug, rec.ClaimID):
+			kv.Unstake(cross(rlm), slug, rec.ClaimID, sideYES, s)
+			unstaked = s
+		}
+	}
+	if settled && !kv.RewardsOpened(slug, rec.ClaimID) && !kv.ClaimClosed(slug, rec.ClaimID) {
+		kv.OpenRewards(cross(rlm), slug, rec.ClaimID)
+		opened = true
+	}
+	return jsonw.New().Uint("dispute", disputeID).Uint("claim", rec.ClaimID).Int("withdrawn", withdrawn).Int("unstaked", unstaked).
+		Bool("opened", opened).Int("float", float()).String()
 }
 
 func reclaim(_ int, rlm realm, disputeID uint64) string {
@@ -421,7 +525,10 @@ func reclaim(_ int, rlm realm, disputeID uint64) string {
 	}
 	winnerPaid, authorPaid, answererPaid := kv.PullState(slug, rec.ClaimID, me)
 	var winner, author, answerer int64
-	if !winnerPaid && kv.Provisional(slug, rec.ClaimID) == sideYES {
+	// only a position the mirror actually holds draws (a record that followed
+	// a foreign answer never staked, and Kourt refuses a missing position)
+	held := rec.Stake > 0 || kv.StakeOf(slug, rec.ClaimID, sideYES, me) > 0
+	if !winnerPaid && held && kv.Provisional(slug, rec.ClaimID) == sideYES {
 		winner = kv.WithdrawBonus(cross(rlm), slug, rec.ClaimID, sideYES)
 	}
 	if !authorPaid {
@@ -436,8 +543,12 @@ func reclaim(_ int, rlm realm, disputeID uint64) string {
 
 // ---- pages
 
-// Render lists the mirror records; the permanent realm prefixes the
-// attribution the Kourt licence asks for.
+// pageSize is how many records a page of the index lists.
+const pageSize = 50
+
+// Render lists the mirror records, newest first and paged (`:page/<n>`);
+// `:dispute/<id>` shows one. The permanent realm prefixes the attribution
+// the Kourt licence asks for.
 func (*implKourtV3) Render(_ int, rlm realm, path string) string {
 	if strings.HasPrefix(path, "json") {
 		return renderJSON(strings.Split(strings.Trim(strings.TrimPrefix(path, "json"), "/"), "/"))
@@ -447,37 +558,70 @@ func (*implKourtV3) Render(_ int, rlm realm, path string) string {
 	b.WriteString("Every resolved dispute is filed as a claim in the DAO's court [" + kourt.CourtSlug + "](" + courtURL + ") on Kourt v3 (`" + kourtPath + "`)")
 	if kv.Exists(kourt.CourtSlug) {
 		b.WriteString(" · float " + cc(float()) + " CC (" + cc(spendable()) + " free)")
+		if kv.CourtOneWay(kourt.CourtSlug) {
+			b.WriteString(" · **one-way court**: its coin never returns GNOT, so the float cannot be redeemed")
+		} else {
+			b.WriteString(" · two-way court")
+		}
 	} else {
 		b.WriteString(" · court not founded yet (`EnsureCourt`)")
 	}
 	b.WriteString("\n\n")
-	if path != "" {
+	page := 1
+	switch {
+	case path == "":
+	case strings.HasPrefix(path, "dispute/"):
 		id, err := strconv.ParseUint(strings.TrimPrefix(path, "dispute/"), 10, 64)
 		if err == nil {
 			if rec := kourt.GetRecord(id); rec != nil {
-				b.WriteString("| | |\n|---|---|\n| dispute | [" + u(rec.Dispute) + "](" + disputeURL(rec.Dispute) + ") |\n| state | " + rec.State + " |\n| claim | " + claimLink(rec) + " |\n| title | " + rec.Title + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + rec.Route + ") |\n| stake | " + cc(rec.Stake) + " CC |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
+				b.WriteString("| | |\n|---|---|\n| dispute | [" + u(rec.Dispute) + "](" + disputeURL(rec.Dispute) + ") |\n| state | " + rec.State + " |\n| claim | " + claimLink(rec) + " |\n| title | " + cell(rec.Title) + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + cell(rec.Route) + ") |\n| stake | " + cc(rec.Stake) + " CC |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
 				if rec.ClaimID != 0 && rec.Binding == binding && kv.Exists(kourt.CourtSlug) {
-					b.WriteString("| Kourt says | " + kv.ClaimStatus(kourt.CourtSlug, rec.ClaimID) + " |\n")
+					b.WriteString("| Kourt says | " + cell(kv.ClaimStatus(kourt.CourtSlug, rec.ClaimID)) + " |\n")
 				}
 				return b.String()
 			}
 		}
-		b.WriteString("_No mirror record at `" + path + "`; records live at `:dispute/<id>`, the court's own pages at [" + courtURL + "](" + courtURL + ")._\n\n")
-	}
-	b.WriteString("| dispute | state | claim | title |\n|---|---|---|---|\n")
-	n := 0
-	for id := uint64(1); id <= core.DisputeCount(); id++ {
-		rec := kourt.GetRecord(id)
-		if rec == nil {
-			continue
+		b.WriteString("_No mirror record there; records live at `:dispute/<id>`, the court's own pages at [" + courtURL + "](" + courtURL + ")._\n\n")
+	case strings.HasPrefix(path, "page/"):
+		if n, err := strconv.Atoi(strings.TrimPrefix(path, "page/")); err == nil && n >= 1 {
+			page = n
 		}
-		n++
-		b.WriteString("| [" + u(id) + "](:dispute/" + u(id) + ") | " + rec.State + " | " + claimLink(rec) + " | " + rec.Title + " |\n")
+	default:
+		b.WriteString("_No such page; records live at `:dispute/<id>`, the index at `:page/<n>`._\n\n")
 	}
-	if n == 0 {
+	recs := kourt.NewestRecords((page-1)*pageSize, pageSize)
+	total := int(kourt.Count())
+	b.WriteString("| dispute | state | claim | title |\n|---|---|---|---|\n")
+	for _, rec := range recs {
+		b.WriteString("| [" + u(rec.Dispute) + "](:dispute/" + u(rec.Dispute) + ") | " + rec.State + " | " + claimLink(rec) + " | " + cell(rec.Title) + " |\n")
+	}
+	if total == 0 {
 		b.WriteString("\n_No records yet: a record appears when a resolved dispute is cranked._\n")
 	}
+	b.WriteString(pager(page, total))
 	return b.String()
+}
+
+// pager links the neighbouring pages of the record index.
+func pager(page, total int) string {
+	var links []string
+	if page > 1 {
+		links = append(links, "[newer](:page/"+strconv.Itoa(page-1)+")")
+	}
+	if page*pageSize < total {
+		links = append(links, "[older](:page/"+strconv.Itoa(page+1)+")")
+	}
+	if len(links) == 0 {
+		return ""
+	}
+	return "\nPage " + strconv.Itoa(page) + " of " + strconv.Itoa((total+pageSize-1)/pageSize) + " · " + strings.Join(links, " · ") + "\n"
+}
+
+// cell makes a string safe for a markdown table cell.
+func cell(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 // courtURL is the court's page on gnoweb.
@@ -522,7 +666,7 @@ func renderJSON(parts []string) string {
 	head := func() *jsonw.Object {
 		exists := kv.Exists(kourt.CourtSlug)
 		return jsonw.New().Int("now", now()).Str("live", kourt.LivePath()).Str("court", kourt.CourtSlug).Str("kourt", kourtPath).
-			Str("address", string(kourt.Address())).Bool("courtExists", exists).Int("float", float()).Int("spendable", spendable()).Int("creationBurn", kv.CourtCreationBurn()).
+			Str("address", string(kourt.Address())).Bool("courtExists", exists).Bool("oneWay", exists && kv.CourtOneWay(kourt.CourtSlug)).Int("float", float()).Int("spendable", spendable()).Int("creationBurn", kv.CourtCreationBurn()).
 			Uint("count", kourt.Count()).Uint("disputes", core.DisputeCount())
 	}
 	if len(parts) == 0 || parts[0] == "" || parts[0] == "now" {

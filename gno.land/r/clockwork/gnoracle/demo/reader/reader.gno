@@ -1,10 +1,12 @@
 // Package reader is an example consumer realm for the local demo (`make
-// demo`): anyone may ask it to read a Gnoracle feed, and it keeps every value
-// it was served together with the block height and chain time of the read,
-// which its page lists. Reads cost nothing per call and change nothing, but
-// the core serves them only to realms subscribed to the feed, so someone
-// pays periods for this realm with `SubscribeRealm`, the way any consumer
-// realm on gno.land would be set up. It is not part of a deployment.
+// demo`): anyone may ask it to read a Gnoracle feed, and it keeps the values
+// it was served together with the block height and chain time of each read,
+// which its page lists. Reads cost nothing per call and change nothing. The
+// core serves a recurring, non-sponsored feed only to subscribed realms, so
+// someone pays periods for this realm with `SubscribeRealm`, the way any
+// consumer realm on gno.land would be set up; a sponsored feed and a final
+// one-off outcome are open to every realm and need no subscription. It is not
+// part of a deployment.
 package reader
 
 import (
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"gno.land/p/clockwork/gnoracle/jsonw/v0"
+	"gno.land/p/nt/avl/v0"
 	"gno.land/r/clockwork/gnoracle/core"
 )
 
@@ -31,17 +34,30 @@ type Reading struct {
 	Caller   address
 }
 
-// maxKept bounds the stored history; older readings are dropped first.
-const maxKept = 2000
+const (
+	// maxKept bounds the stored history; older readings are dropped first.
+	maxKept = 2000
+	// shown is how many of the newest readings the page and the JSON view list.
+	shown = 50
+)
 
 var (
 	selfPath string
-	readings []Reading
+	readings = avl.NewTree() // seqKey(seq) -> *Reading
 	seq      int64
 )
 
 func init(cur realm) {
 	selfPath = cur.PkgPath()
+}
+
+// seqKey zero-pads a sequence number so the tree orders readings by it.
+func seqKey(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	for len(s) < 19 {
+		s = "0" + s
+	}
+	return s
 }
 
 // Address is this realm's account.
@@ -50,34 +66,55 @@ func Address() address { return chain.PackageAddress(selfPath) }
 // Path is this realm's package path: what `SubscribeRealm` takes.
 func Path() string { return selfPath }
 
-// Poll reads feedID through the core's Read (this realm must be subscribed
-// to the feed) and stores the reading. Any account or realm may call it.
+// Poll reads feedID through the core's Read and stores the reading (a
+// recurring, non-sponsored feed must have this realm subscribed; a sponsored
+// feed or a final one-off outcome needs no subscription). Any account or
+// realm may call it.
 func Poll(cur realm, feedID uint64) (value int64, round uint64, tier string) {
 	v, dec, rid, _, t := core.Read(cross(cur), feedID)
 	seq++
-	readings = append(readings, Reading{
+	readings.Set(seqKey(seq), &Reading{
 		Seq: seq, Height: runtime.ChainHeight(), Time: time.Now().Unix(), Feed: feedID,
 		Round: rid, Value: v, Decimals: dec, Tier: t, Caller: cur.Previous().Address(),
 	})
-	if len(readings) > maxKept {
-		readings = readings[len(readings)-maxKept:]
+	if readings.Size() > maxKept {
+		// sequence numbers are contiguous, so the oldest kept one is known
+		readings.Remove(seqKey(seq - int64(maxKept)))
 	}
 	chain.Emit("ReaderPolled", "feed", strconv.FormatUint(feedID, 10), "round", strconv.FormatUint(rid, 10), "value", strconv.FormatInt(v, 10), "tier", t)
 	return v, rid, t
 }
 
 // Count is the number of readings kept.
-func Count() int { return len(readings) }
+func Count() int { return readings.Size() }
 
 // Last returns the most recent reading, or a zero Reading.
 func Last() Reading {
-	if len(readings) == 0 {
-		return Reading{}
+	if v := readings.Get(seqKey(seq)); v != nil {
+		return *v.(*Reading)
 	}
-	return readings[len(readings)-1]
+	return Reading{}
 }
 
-// Render lists the readings, newest first; `json` serves them as a machine
+// newest returns up to n readings, newest first.
+func newest(n int) []*Reading {
+	out := []*Reading{}
+	readings.ReverseIterateByOffset(0, n, func(_ string, v any) bool {
+		out = append(out, v.(*Reading))
+		return false
+	})
+	return out
+}
+
+// cell makes a string safe for a markdown table cell.
+func cell(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.ReplaceAll(s, "\n", " ")
+}
+
+// Render lists the newest readings first; `json` serves them as a machine
 // view.
 func Render(path string) string {
 	if strings.HasPrefix(path, "json") {
@@ -86,58 +123,78 @@ func Render(path string) string {
 	var b strings.Builder
 	b.WriteString("# Example consumer realm\n\n")
 	b.WriteString("This realm reads a Gnoracle feed when anyone calls `Poll(feedID)` and keeps what it was served. ")
-	b.WriteString("A read costs nothing and changes nothing; the core serves it because this realm is subscribed to the feed.\n\n")
+	b.WriteString("A read costs nothing and changes nothing; the core serves a recurring feed because this realm is subscribed to it ")
+	b.WriteString("(a sponsored feed or a final one-off outcome needs no subscription).\n\n")
 	b.WriteString("| | |\n|---|---|\n")
 	b.WriteString("| realm | `" + selfPath + "` (address `" + string(Address()) + "`) |\n")
-	if len(readings) > 0 {
-		b.WriteString("| subscription | " + subscriptionLine(readings[len(readings)-1].Feed) + " |\n")
+	n := readings.Size()
+	if n > 0 {
+		b.WriteString("| subscription | " + subscriptionLine(Last().Feed) + " |\n")
 	}
-	b.WriteString("| readings kept | " + strconv.Itoa(len(readings)) + " |\n")
-	if len(readings) == 0 {
+	b.WriteString("| readings kept | " + strconv.Itoa(n) + " |\n")
+	if n == 0 {
 		b.WriteString("\n_No readings yet: nobody has called `Poll` since this realm was deployed._\n")
 		return b.String()
 	}
-	// Last() is a free view; a page is a query, so it may show the stored
-	// reading, but it cannot read the feed itself (that is a paid call)
-	last := Last()
-	name := strconv.FormatUint(last.Feed, 10)
-	if f := core.GetFeed(last.Feed); f != nil && f.Spec != nil {
-		name += " " + f.Spec.Name
-	}
-	b.WriteString("| last reading | **" + fixed(last.Value, last.Decimals) + "** (" + last.Tier + ") for round " + strconv.FormatUint(last.Round, 10) +
-		" of feed " + name + ", read at height " + strconv.FormatInt(last.Height, 10) + ", " + time.Unix(last.Time, 0).UTC().Format("2006-01-02 15:04:05") + " UTC |\n\n")
-	b.WriteString("| # | height | chain time | feed | round | value | tier |\n|---|---|---|---|---|---|---|\n")
-	for i := len(readings) - 1; i >= 0; i-- {
-		r := readings[i]
-		name := strconv.FormatUint(r.Feed, 10)
-		if f := core.GetFeed(r.Feed); f != nil && f.Spec != nil {
-			name += " " + f.Spec.Name
+	// a page is a query, so it may show the stored readings, but it cannot
+	// read the feed itself (that is a call)
+	names := map[uint64]string{}
+	name := func(feed uint64) string {
+		if s, ok := names[feed]; ok {
+			return s
 		}
-		b.WriteString("| " + strconv.FormatInt(r.Seq, 10) + " | " + strconv.FormatInt(r.Height, 10) + " | " + time.Unix(r.Time, 0).UTC().Format("2006-01-02 15:04:05") +
-			" | " + name + " | " + strconv.FormatUint(r.Round, 10) + " | " + fixed(r.Value, r.Decimals) + " | " + r.Tier + " |\n")
+		s := strconv.FormatUint(feed, 10)
+		if f := core.GetFeed(feed); f != nil && f.Spec != nil {
+			s += " " + cell(f.Spec.Name)
+		}
+		names[feed] = s
+		return s
+	}
+	last := Last()
+	b.WriteString("| last reading | **" + fixed(last.Value, last.Decimals) + "** (" + cell(last.Tier) + ") for round " + strconv.FormatUint(last.Round, 10) +
+		" of feed " + name(last.Feed) + ", read at height " + strconv.FormatInt(last.Height, 10) + ", " + stamp(last.Time) + " UTC |\n\n")
+	list := newest(shown)
+	if n > len(list) {
+		b.WriteString("_The newest " + strconv.Itoa(len(list)) + " of " + strconv.Itoa(n) + " readings:_\n\n")
+	}
+	b.WriteString("| # | height | chain time | feed | round | value | tier |\n|---|---|---|---|---|---|---|\n")
+	for _, r := range list {
+		b.WriteString("| " + strconv.FormatInt(r.Seq, 10) + " | " + strconv.FormatInt(r.Height, 10) + " | " + stamp(r.Time) +
+			" | " + name(r.Feed) + " | " + strconv.FormatUint(r.Round, 10) + " | " + fixed(r.Value, r.Decimals) + " | " + cell(r.Tier) + " |\n")
 	}
 	return b.String()
 }
 
+func stamp(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04:05") }
+
+// renderJSON serves the count of readings kept and the newest ones, newest
+// first.
 func renderJSON() string {
 	a := jsonw.NewArray()
-	for i := len(readings) - 1; i >= 0; i-- {
-		r := readings[i]
+	for _, r := range newest(shown) {
 		a.Raw(jsonw.New().Int("seq", r.Seq).Int("height", r.Height).Int("time", r.Time).Uint("feed", r.Feed).Uint("round", r.Round).
 			Int("value", r.Value).Int("decimals", r.Decimals).Str("tier", r.Tier).Str("caller", string(r.Caller)).String())
 	}
 	until := int64(0)
-	if len(readings) > 0 {
-		if s := core.GetSubscription(readings[len(readings)-1].Feed, selfPath); s != nil {
+	if readings.Size() > 0 {
+		if s := core.GetSubscription(Last().Feed, selfPath); s != nil {
 			until = s.PaidUntil
 		}
 	}
 	return jsonw.New().Int("now", time.Now().Unix()).Int("height", runtime.ChainHeight()).Str("address", string(Address())).Str("path", selfPath).
-		Int("subscribedUntil", until).Int("count", int64(len(readings))).Raw("readings", a.String()).String()
+		Int("subscribedUntil", until).Int("count", int64(readings.Size())).Raw("readings", a.String()).String()
 }
 
 // subscriptionLine describes this realm's subscription to a feed.
 func subscriptionLine(feed uint64) string {
+	if f := core.GetFeed(feed); f != nil && f.Spec != nil {
+		if !f.Spec.IsRecurring() {
+			return "not needed: feed " + strconv.FormatUint(feed, 10) + " is a one-off outcome, open to every realm once final"
+		}
+		if f.Spec.Sponsored {
+			return "not needed: feed " + strconv.FormatUint(feed, 10) + " is sponsored, free for every realm"
+		}
+	}
 	s := core.GetSubscription(feed, selfPath)
 	if s == nil {
 		return "none on feed " + strconv.FormatUint(feed, 10) + " (reads are refused until someone runs `SubscribeRealm`)"
@@ -146,7 +203,7 @@ func subscriptionLine(feed uint64) string {
 	if s.PaidUntil <= time.Now().Unix() {
 		state = "lapsed"
 	}
-	return "feed " + strconv.FormatUint(feed, 10) + ": " + state + " until " + time.Unix(s.PaidUntil, 0).UTC().Format("2006-01-02 15:04:05") + " UTC, " + gnot(s.Paid) + " GNOT paid over " + strconv.FormatInt(s.Periods, 10) + " period(s)"
+	return "feed " + strconv.FormatUint(feed, 10) + ": " + state + " until " + stamp(s.PaidUntil) + " UTC, " + gnot(s.Paid) + " GNOT paid over " + strconv.FormatInt(s.Periods, 10) + " period(s)"
 }
 
 // fixed prints a value with the feed's decimals.

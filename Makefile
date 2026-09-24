@@ -22,15 +22,20 @@ export GNOKEY
 # address (see docs/IMPLEMENTATION_PLAN.md §16).
 NS ?= g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm
 export NS
+# The bootstrap authority of core, dao and kourt and the token's genesis
+# holder. The sources name the public test1 key; `make build` replaces it with
+# ADMIN, which defaults to NS when NS is an address, and `make deploy` refuses
+# a build that still names test1 on any chain other than "dev".
+ADMIN ?=
 
 PKGS := ./gno.land/...
 
-.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim agent-soak demo demo-stop
+.PHONY: help toolchain gnodev-build deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim agent-soak demo demo-stop
 
 help: ## this list
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | awk -F ":.*## " "{ printf \"  %-10s %s\\n\", \$$1, \$$2 }"
 
-toolchain: ## build the pinned gno and gnokey ($(GNO_REF)) into $(GNO_STORE) (once)
+toolchain: ## build the pinned gno, gnokey and gnodev ($(GNO_REF)) into $(GNO_STORE) (once)
 	@if [ ! -x "$(GNO)" ]; then \
 		echo "building gno $(GNO_REF) into $(GNO_STORE) (once)"; \
 		mkdir -p "$(GNO_STORE)"; \
@@ -45,7 +50,25 @@ toolchain: ## build the pinned gno and gnokey ($(GNO_REF)) into $(GNO_STORE) (on
 		echo "fetching the gno $(GNO_REF) sources for GNOROOT (stdlibs)"; \
 		go mod download "github.com/gnolang/gno@$(GNO_REF)" || exit 1; \
 	fi; \
-	echo "gno: $(GNO)"; echo "gnokey: $(GNOKEY)"; echo "GNOROOT: $(GNOROOT)"
+	if [ ! -x "$(GNODEV)" ]; then \
+		$(MAKE) --no-print-directory gnodev-build || exit 1; \
+	fi; \
+	echo "gno: $(GNO)"; echo "gnokey: $(GNOKEY)"; echo "gnodev: $(GNODEV)"; echo "GNOROOT: $(GNOROOT)"
+
+# gnodev is a nested module of the gno repository with no tag of its own and a
+# `replace github.com/gnolang/gno => ../..`, so `go install ...@v1.2.0` cannot
+# build it. Fetch the module at the commit the gno tag points to, copy it
+# under $(GNO_STORE)/src, point the replace at GNOROOT (the same tag) and build.
+gnodev-build:
+	@set -e; \
+	echo "building gnodev $(GNO_REF) into $(GNO_STORE) (once; make dev and make demo run it)"; \
+	hash="$$(go mod download -json "github.com/gnolang/gno@$(GNO_REF)" | sed -n 's/.*"Hash": *"\([0-9a-f]*\)".*/\1/p' | head -1)"; \
+	[ -n "$$hash" ] || { echo "gnodev: cannot resolve the commit of gno $(GNO_REF)" >&2; exit 1; }; \
+	dir="$$(go mod download -json "github.com/gnolang/gno/contribs/gnodev@$$hash" | sed -n 's/.*"Dir": *"\([^"]*\)".*/\1/p' | head -1)"; \
+	[ -n "$$dir" ] && [ -f "$$dir/go.mod" ] || { echo "gnodev: cannot fetch github.com/gnolang/gno/contribs/gnodev@$$hash" >&2; exit 1; }; \
+	src="$(GNO_STORE)/src/gnodev"; \
+	rm -rf "$$src"; mkdir -p "$(GNO_STORE)/src"; cp -R "$$dir" "$$src"; chmod -R u+w "$$src"; \
+	cd "$$src" && go mod edit -replace "github.com/gnolang/gno=$(GNOROOT)" && go build -o "$(GNODEV)" .
 
 deps: ## mirror on-chain dependencies into deps/ (needed for the realms, not the pure packages)
 	@./scripts/deps.sh
@@ -78,6 +101,7 @@ WATCH ?= 0
 DEV_PATHS ?= gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/core/impl/v2,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/impl/v2,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1,gno.land/r/clockwork/gnoracle/kourt/impl/kourtv3,gno.land/r/clockwork/gnoracle/demo/reader
 
 dev: toolchain deps ## local chain + gnoweb (RPC=36657 WEB=38888 matches the dev configs; WATCH=1 hot-reloads on edits and resets the chain)
+	@[ -x "$(GNODEV)" ] || { echo "dev: no gnodev at $(GNODEV) (make gnodev-build, or GNODEV=/path/to/gnodev)" >&2; exit 1; }
 	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -web-help-remote http://127.0.0.1:$(RPC) $(if $(filter 0,$(WATCH)),-no-watch) -paths $(DEV_PATHS) -web-home /r/clockwork/gnoracle/core .
 
 chain-test: ## drive a running gnodev through a feed lifecycle with gnokey (needs make dev in another shell)
@@ -86,11 +110,11 @@ chain-test: ## drive a running gnodev through a feed lifecycle with gnokey (need
 dev-keys: ## throwaway keybase with the public test1 key, for the local chain
 	@./scripts/dev-keys.sh
 
-build: ## build/ with paths rewritten to NS
-	@./scripts/deploy.sh build
+build: ## build/ with paths rewritten to NS and the bootstrap authority to ADMIN (default: NS when it is an address)
+	@ADMIN="$(ADMIN)" ./scripts/deploy.sh build
 
-deploy: ## addpkg every package under NS (skips what is live)
-	@./scripts/deploy.sh deploy
+deploy: ## addpkg every package under NS (skips what is live; refuses the test1 authority off chain id dev)
+	@ADMIN="$(ADMIN)" ./scripts/deploy.sh deploy
 
 # ---- off-chain tools (Go): provider agent, notifier/cranker bot, operator CLI
 

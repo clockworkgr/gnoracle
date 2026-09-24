@@ -1,4 +1,15 @@
 # Agent soak showcase: three providers, the bot and one feed on gnodev
+
+> **Historical capture.** This run predates the removal of metered reads
+> (2026-09-24) and is kept as it was recorded. Since then the spec field
+> `readPrice`, the `renderDelay` that made the views show `delayed`, and
+> the chain-test step "deposit consumer credit and read" no longer exist:
+> realms read free per call under a per-period subscription, and
+> `make chain-test` now subscribes the example reader realm
+> (`demo/reader`) instead. The soak's bot now signs with a key of its own,
+> `soakbot`, rather than the `test1` it shared with an agent in this run.
+> The round pools, credits and health figures below reflect the old read
+> fee.
 A complete, unedited run of `make agent-soak` on 2026-09-23 (UTC 14:02:09 to 14:07:18), from repository commit `ff248d4`, against a local gno v1.2.0 chain. Every command, log line and chain state below was captured from that run; nothing is illustrative. It shows the whole loop the protocol relies on: providers register with stake, their agents fetch a value each round, submit it, the round finalises (early, when everyone obliged has submitted), rewards accrue, and the bot announces every step while cranking what nobody else did.
 Chain time in the tables below is UTC; the tool logs are in the host's local time (UTC+3).
 

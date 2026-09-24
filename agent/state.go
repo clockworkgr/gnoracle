@@ -17,6 +17,7 @@ type FeedState struct {
 	LastRound   uint64 `json:"lastRound"`
 	HasValue    bool   `json:"hasValue"`
 	LastValue   int64  `json:"lastValue"`
+	ValueRound  uint64 `json:"valueRound"` // the round LastValue was submitted to (0 in states written before it was kept)
 	LastClaimAt int64  `json:"lastClaimAt"`
 	LastTxHash  string `json:"lastTxHash"`
 }

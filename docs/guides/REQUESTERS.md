@@ -75,8 +75,9 @@ cannot receive coins from calls.
 
 Trusted requesters (allowlisted realm paths with a cap set by the DAO,
 `trusted-requester` proposal kind) activate one-off feeds themselves when the
-declared `valueAtStake` is under the cap; gnomarket's outcome requests use
-this path.
+declared `valueAtStake` is at most both the realm's own cap and the core's
+`trustedOneOffCap` (50,000 GNOT); gnomarket's outcome requests use this
+path.
 
 ## After activation
 

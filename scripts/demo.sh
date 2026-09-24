@@ -28,6 +28,7 @@ export NS=clockwork
 export REMOTE="${REMOTE:-http://127.0.0.1:$RPC}"
 export CHAINID="${CHAINID:-dev}"
 export GNOKEY="${GNOKEY:-$HOME/.cache/gno-toolchains/${GNO_REF:-v1.2.0}/gnokey}"
+export GNODEV="${GNODEV:-$HOME/.cache/gno-toolchains/${GNO_REF:-v1.2.0}/gnodev}"   # make dev runs it
 export GNOKEY_HOME="$here/.dev-keys"
 export GNOKEY_PASSWORD="${GNOKEY_PASSWORD:-devpassword}"
 export GNORACLE_KEY_PASSWORD="$GNOKEY_PASSWORD"
@@ -164,6 +165,11 @@ preflight() {
   step "preflight"
   [ -x "$GNOKEY" ] || fail "gnokey not found at $GNOKEY (run make toolchain)"
   command -v python3 >/dev/null || fail "python3 is needed"
+  if ! lsof -nP -iTCP:"$RPC" -sTCP:LISTEN >/dev/null 2>&1 && [ ! -x "$GNODEV" ]; then
+    say "no chain on $RPC and no gnodev at $GNODEV: building the pinned toolchain (make toolchain)"
+    make -s toolchain >/dev/null || true
+    [ -x "$GNODEV" ] || fail "no chain listens on $RPC and gnodev is not at $GNODEV to start one (make toolchain builds it; or set GNODEV)"
+  fi
   mkdir -p "$OUT/www"
   if [ -f "$OUT/pids" ]; then say "stopping the previous demo's processes"; KEEP_CHAIN=1 stop_all >/dev/null || true; fi
   make -s go-build
@@ -239,7 +245,6 @@ dev_clocks() {
   lower_param dao commitPeriod 60        # 24 h
   lower_param dao revealPeriod 60        # 24 h
   lower_param core appealWindow 30       # 24 h
-  lower_param dao epochBlocks 10         # 720 blocks: voting weight activates at the next epoch
   lower_param core providerMinStakeFloor 1000000000   # 10,000 GNOT
 }
 
@@ -293,6 +298,8 @@ create_feed() {
 }
 
 write_configs() {
+  # a new feed: journals and agent state from earlier runs would skew the counts
+  rm -f "$OUT"/*-journal.jsonl "$OUT"/*-state.json "$OUT/bot-state.json"
   echo '{"data":{"base":"GNOT","currency":"USD","amount":"1.0012"}}' > "$OUT/www/price.json"
   local i=0 name src
   for name in "${PROVIDERS[@]}"; do
@@ -300,7 +307,7 @@ write_configs() {
     if [ $((i % 2)) -eq 1 ]; then
       src=$'adapter = "http"\nurls = ["http://127.0.0.1:'"$PRICE_PORT"$'/price.json"]\npath = "data.amount"'
     else
-      src=$'adapter = "exec"\ncommand = ["sh", "-c", "printf \'1.00%02d\\n\' $((RANDOM % 40))"]'
+      src=$'adapter = "exec"\ncommand = ["sh", "-c", "awk \'BEGIN { srand(); printf \\"1.00%02d\\\\n\\", int(rand() * 40) }\'"]'
     fi
     cat > "$OUT/$name.toml" <<CFG
 remote = "$REMOTE"
@@ -335,7 +342,7 @@ start_workers() {
     detach "agent-$name" "$OUT/$name.log" bin/gnoracle-agent -config "$OUT/$name.toml"
   done
   detach bot "$OUT/bot.log" bin/gnoracle-bot -config "$OUT/bot.toml"
-  detach reader-poller "$OUT/reader-poll.log" bash "$0" poll "$FEED" "$READ_EVERY"
+  detach reader-poller "$OUT/reader-poll.log" bash "$here/scripts/demo.sh" poll "$FEED" "$READ_EVERY"
   say "agents ${PROVIDERS[*]} (http and exec adapters), bot $BOTKEY, reader polls every ${READ_EVERY}s as $READERKEY"
   say "watch the rounds arrive on the feed page and the readings on the reader realm's page (links above)"
 }
@@ -422,12 +429,22 @@ vote() {
 }
 
 kourt_state() { "${CLI[@]}" -raw kourt "$DID" 2>/dev/null | jq_ 'print(d["state"] if d.get("exists") else "none")'; }
-crank_to() { # <state> <tries>
+# kourt_rank orders the mirror's states: a record only moves forward, and the
+# demo bot cranks the mirror too (every 2 min), so a record may already be past
+# the state a step waits for
+kourt_rank() {
+  case "$1" in
+    pending) echo 0 ;; filed) echo 1 ;; staked) echo 2 ;; answered) echo 3 ;; contested) echo 4 ;;
+    settled|confirmed|dissent|abandoned) echo 5 ;;
+    *) echo -1 ;;
+  esac
+}
+crank_to() { # <state> <tries>: crank until the record is at or past the state
   local target="$1" tries="${2:-8}" st
   while :; do
     st="$(kourt_state)"
-    [ "$st" = "$target" ] && { say "mirror record: $st"; return 0; }
-    [ "$tries" -gt 0 ] || fail "the mirror record is $st, not $target"
+    [ "$(kourt_rank "$st")" -ge "$(kourt_rank "$target")" ] && { say "mirror record: $st"; return 0; }
+    [ "$tries" -gt 0 ] || fail "the mirror record is $st, not $target or later"
     tries=$((tries - 1))
     KEY=test1 callq "$KOURT" Crank "$DID" || true
     sleep 1
@@ -463,7 +480,7 @@ mirror_to_kourt() {
     say "Kourt says: $(qeval "$KV3.ClaimStatus(\"gnoracle\", $CLAIM)" | tr -d '()' | sed 's/ string$//')"
     say "float now $(qeval "$KV3.CoinBalanceOf(\"gnoracle\", \"$KADDR\")" | num) micro-CC"
   else
-    say "Kourt's clock is real here: the bot cranks the mirror hourly; the answer follows ~3 h of blocks and the settlement 72 h later"
+    say "Kourt's clock is real here: the demo bot cranks the mirror every 2 min; the answer follows ~3 h of blocks and the settlement 72 h later"
   fi
 }
 

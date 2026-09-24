@@ -86,6 +86,12 @@ func (*implV1) Crank(_ int, rlm realm, disputeID uint64) string {
 		id := kv.OpenClaimP(cross(rlm), kourt.CourtSlug, rec.Title, body(d))
 		st.Set(disputeID, kourt.StateFiled, id, t, 0, "", 0)
 	case kourt.StateFiled:
+		if kv.HasAnswer(kourt.CourtSlug, rec.ClaimID) {
+			// a holder answered before the mirror staked: staking is frozen,
+			// so the mirror follows the claim to its verdict without a position
+			st.Set(disputeID, kourt.StateAnswered, 0, t, 0, "", 0)
+			return kourt.StateAnswered
+		}
 		kv.Stake(cross(rlm), kourt.CourtSlug, rec.ClaimID, sideYES, stakeCC)
 		st.Set(disputeID, kourt.StateStaked, 0, t, 0, "", stakeCC)
 	case kourt.StateStaked:
@@ -129,7 +135,9 @@ func (*implV1) Crank(_ int, rlm realm, disputeID uint64) string {
 func finish(st *kourt.StateRef, rlm realm, rec *kourt.Record, t int64) string {
 	verdict := kv.Verdict(kourt.CourtSlug, rec.ClaimID)
 	route := kv.VerdictRoute(kourt.CourtSlug, rec.ClaimID)
-	kv.WithdrawStake(cross(rlm), kourt.CourtSlug, rec.ClaimID, sideYES)
+	if rec.Stake > 0 {
+		kv.WithdrawStake(cross(rlm), kourt.CourtSlug, rec.ClaimID, sideYES)
+	}
 	// the DAO's position is YES; whoever answered and however it settled,
 	// a verdict against it is dissent
 	state := kourt.StateSettled
@@ -163,57 +171,93 @@ func finalValue(d *core.DisputeRecord) int64 {
 	return d.PriorValue
 }
 
-// body is the JSON record (at most 2000 bytes).
+// body is the JSON record (at most 2000 bytes): a long evidence string, then
+// a long feed name, is cut to fit, and the record then says it was truncated.
 func body(d *core.DisputeRecord) string {
-	f := core.GetFeed(d.Feed)
 	name := ""
-	if f != nil && f.Spec != nil {
+	if f := core.GetFeed(d.Feed); f != nil && f.Spec != nil {
 		name = f.Spec.Name
 	}
-	var b strings.Builder
-	b.WriteString(`{"dispute":` + u(d.ID) + `,"feed":` + u(d.Feed) + `,"feedName":` + strconv.Quote(name) +
-		`,"round":` + u(d.Round) + `,"outcome":` + strconv.Quote(d.Outcome) + `,"tier":` + strconv.Quote(d.TierDecided) +
-		`,"priorValue":` + strconv.FormatInt(d.PriorValue, 10) + `,"proposedValue":` + strconv.FormatInt(d.ProposedValue, 10) +
-		`,"disputer":` + strconv.Quote(string(d.Disputer)) + `,"bond":` + strconv.FormatInt(d.Bond, 10) +
-		`,"slashed":` + strconv.FormatInt(d.Slashed, 10) + `,"coherentWeight":` + strconv.FormatInt(d.CoherentW, 10) +
-		`,"ballotRound":` + strconv.FormatInt(d.BallotRound, 10) + `,"evidenceHash":` + strconv.Quote(d.EvidenceHash) +
-		`,"resolvedAt":` + strconv.FormatInt(d.ResolvedAt, 10) + `,"source":"gno.land/r/clockwork/gnoracle/core:dispute/` + u(d.ID) + `"}`)
-	s := b.String()
-	if len(s) > 2000 {
-		s = s[:2000]
+	ev := d.EvidenceHash
+	cut := false
+	for {
+		o := jsonw.New().Uint("dispute", d.ID).Uint("feed", d.Feed).Str("feedName", name).Uint("round", d.Round).
+			Str("outcome", d.Outcome).Str("tier", d.TierDecided).Int("priorValue", d.PriorValue).Int("proposedValue", d.ProposedValue).
+			Str("disputer", string(d.Disputer)).Int("bond", d.Bond).Int("slashed", d.Slashed).Int("coherentWeight", d.CoherentW).
+			Int("ballotRound", d.BallotRound).Str("evidenceHash", ev).Int("resolvedAt", d.ResolvedAt).
+			Str("source", core.SelfPath()+":dispute/"+u(d.ID))
+		if cut {
+			o.Bool("truncated", true)
+		}
+		s := o.String()
+		if len(s) <= 2000 || (ev == "" && name == "") {
+			return s
+		}
+		cut = true
+		if ev != "" {
+			ev = ev[:len(ev)/2]
+		} else {
+			name = name[:len(name)/2]
+		}
 	}
-	return s
 }
 
 func u(v uint64) string { return strconv.FormatUint(v, 10) }
 
-// Render lists the mirror records with the attribution the licence asks for.
+// pageSize is how many records a page of the index lists.
+const pageSize = 50
+
+// Render lists the mirror records, newest first and paged (`:page/<n>`);
+// `:dispute/<id>` shows one.
 func (*implV1) Render(_ int, rlm realm, path string) string {
 	if strings.HasPrefix(path, "json") {
 		return renderJSON(strings.Split(strings.Trim(strings.TrimPrefix(path, "json"), "/"), "/"))
 	}
 	var b strings.Builder
 	b.WriteString("# Gnoracle Kourt mirror\n\n")
-	b.WriteString("[built on Kourt](https://kourt.xyz) · court `" + kourt.CourtSlug + "` on `" + kourtPath + "`\n\n")
-	if path != "" {
+	b.WriteString("Court `" + kourt.CourtSlug + "` on the stand-in `" + kourtPath + "` (one-way: no redeem)\n\n")
+	page := 1
+	switch {
+	case path == "":
+	case strings.HasPrefix(path, "dispute/"):
 		id, err := strconv.ParseUint(strings.TrimPrefix(path, "dispute/"), 10, 64)
 		if err == nil {
 			if rec := kourt.GetRecord(id); rec != nil {
-				b.WriteString("| | |\n|---|---|\n| dispute | " + u(rec.Dispute) + " |\n| state | " + rec.State + " |\n| claim | " + u(rec.ClaimID) + " |\n| title | " + rec.Title + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + rec.Route + ") |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
+				b.WriteString("| | |\n|---|---|\n| dispute | " + u(rec.Dispute) + " |\n| state | " + rec.State + " |\n| claim | " + u(rec.ClaimID) + " |\n| title | " + cell(rec.Title) + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + cell(rec.Route) + ") |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
 				return b.String()
 			}
 		}
-		b.WriteString("_No mirror record at `" + path + "`; records live at `:dispute/<id>`._\n\n")
-	}
-	b.WriteString("| dispute | state | claim | title |\n|---|---|---|---|\n")
-	for id := uint64(1); id <= core.DisputeCount(); id++ {
-		rec := kourt.GetRecord(id)
-		if rec == nil {
-			continue
+		b.WriteString("_No mirror record there; records live at `:dispute/<id>`._\n\n")
+	case strings.HasPrefix(path, "page/"):
+		if n, err := strconv.Atoi(strings.TrimPrefix(path, "page/")); err == nil && n >= 1 {
+			page = n
 		}
-		b.WriteString("| [" + u(id) + "](:dispute/" + u(id) + ") | " + rec.State + " | " + u(rec.ClaimID) + " | " + rec.Title + " |\n")
+	default:
+		b.WriteString("_No such page; records live at `:dispute/<id>`, the index at `:page/<n>`._\n\n")
+	}
+	total := int(kourt.Count())
+	b.WriteString("| dispute | state | claim | title |\n|---|---|---|---|\n")
+	for _, rec := range kourt.NewestRecords((page-1)*pageSize, pageSize) {
+		b.WriteString("| [" + u(rec.Dispute) + "](:dispute/" + u(rec.Dispute) + ") | " + rec.State + " | " + u(rec.ClaimID) + " | " + cell(rec.Title) + " |\n")
+	}
+	var links []string
+	if page > 1 {
+		links = append(links, "[newer](:page/"+strconv.Itoa(page-1)+")")
+	}
+	if page*pageSize < total {
+		links = append(links, "[older](:page/"+strconv.Itoa(page+1)+")")
+	}
+	if len(links) > 0 {
+		b.WriteString("\nPage " + strconv.Itoa(page) + " · " + strings.Join(links, " · ") + "\n")
 	}
 	return b.String()
+}
+
+// cell makes a string safe for a markdown table cell.
+func cell(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 const kourtPath = "gno.land/r/clockwork/gnoracle/kourtdev"
@@ -226,7 +270,7 @@ const binding = kourtPath + "#" + kourt.CourtSlug
 // `:json/records[/<from>[/<count>]]` for the bot's Kourt cranking.
 func renderJSON(parts []string) string {
 	head := func() *jsonw.Object {
-		return jsonw.New().Int("now", now()).Str("live", kourt.LivePath()).Str("court", kourt.CourtSlug).Str("kourt", kourtPath).
+		return jsonw.New().Int("now", now()).Str("live", kourt.LivePath()).Str("court", kourt.CourtSlug).Str("kourt", kourtPath).Bool("oneWay", true).
 			Uint("count", kourt.Count()).Uint("disputes", core.DisputeCount())
 	}
 	if len(parts) == 0 || parts[0] == "" || parts[0] == "now" {
