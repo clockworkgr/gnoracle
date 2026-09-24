@@ -1,6 +1,6 @@
 # Being a DAO member
 
-DAO members stake PYTH. Staking earns 15% of every subscription and read fee
+DAO members stake PYTH. Staking earns 15% of every subscription payment
 and a share of dispute rewards; it also obliges you to vote on every dispute.
 Missing a ballot or voting against the outcome costs a small slice of stake
 (UMA-style), so read this before staking.
@@ -34,7 +34,7 @@ The bot announces each one with its deadlines and reminds opted-in members
 
 ```sh
 gnoracle dispute 7                               # the round, the disputer's claim, the evidence hash
-gnoracle round <feed> <round>                    # what was submitted (once delayed), or read the page
+gnoracle round <feed> <round>                    # what was submitted, or read the page
 gnoracle ballot 7                                # phase, deadlines, weights so far
 gnoracle commit 7 UPHOLD                         # during the commit phase
 gnoracle reveal 7                                # during the reveal phase
@@ -89,7 +89,7 @@ and no more is taken that window.
 gnoracle proposal 3
 gnoracle vote 3 yes
 gnoracle execute 3                               # after the timelock, anyone
-gnoracle propose param "core.readPriceFloor=3000" "Raise the read floor" 20gnot
+gnoracle propose param "core.subscriberFloor=5000" "Raise the subscriber floor" 20gnot
 ```
 
 Kinds: `feed-accept`, `feed-update`, `feed-deprecate`, `provider-remove`,

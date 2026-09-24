@@ -2,7 +2,6 @@ package impl
 
 import (
 	"strconv"
-	"strings"
 
 	"gno.land/p/clockwork/gnoracle/spec/v0"
 	json "gno.land/p/onbloc/json/v0"
@@ -15,7 +14,7 @@ func limits() spec.Limits {
 	maxDispute := param("unbondPeriod") - 6*24*3600 - param("appealWindow")
 	return spec.Limits{
 		ProviderMinStakeFloor: param("providerMinStakeFloor"),
-		ReadPriceFloor:        param("readPriceFloor"),
+		SubscriberFloor:       param("subscriberFloor"),
 		SubscriptionFloor:     param("subscriptionFloor"),
 		BountyFloor:           param("bountyFloor"),
 		MaxDisputeWindow:      maxDispute,
@@ -152,7 +151,7 @@ func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 		panic("gnoracle: changes must be a JSON object")
 	}
 	sp := f.Spec
-	readPrice, subPrice, minStake := sp.ReadPrice, sp.SubscriptionPrice, sp.ProviderMinStake
+	subscriberPrice, subPrice, minStake := sp.SubscriberPrice, sp.SubscriptionPrice, sp.ProviderMinStake
 	tol, quar, window := sp.ToleranceBps, sp.QuarantineBps, sp.DisputeWindow
 	get := func(key string, cur int64) int64 {
 		if !root.HasKey(key) {
@@ -168,7 +167,7 @@ func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 		}
 		return v
 	}
-	readPrice = get("readPrice", readPrice)
+	subscriberPrice = get("subscriberPrice", subscriberPrice)
 	subPrice = get("subscriptionPrice", subPrice)
 	minStake = get("providerMinStake", minStake)
 	tol = get("toleranceBps", tol)
@@ -176,8 +175,10 @@ func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 	window = get("disputeWindow", window)
 	lim := limits()
 	switch {
-	case !sp.Sponsored && readPrice < lim.ReadPriceFloor:
-		panic("gnoracle: readPrice is below the floor")
+	case sp.IsRecurring() && !sp.Sponsored && subscriberPrice < lim.SubscriberFloor:
+		panic("gnoracle: subscriberPrice is below the floor")
+	case (!sp.IsRecurring() || sp.Sponsored) && subscriberPrice != 0:
+		panic("gnoracle: only a recurring, non-sponsored feed has a subscriberPrice")
 	case sp.IsRecurring() && subPrice < lim.SubscriptionFloor:
 		panic("gnoracle: subscriptionPrice is below the floor")
 	case minStake < lim.ProviderMinStakeFloor:
@@ -189,14 +190,14 @@ func (*implV1) UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string) {
 	case window < spec.MinDisputeWindow || window > spec.MaxDisputeWindow:
 		panic("gnoracle: disputeWindow out of range")
 	}
-	st.FeedSetSpecEconomics(feedID, readPrice, subPrice, minStake, tol, quar, window)
+	st.FeedSetSpecEconomics(feedID, subscriberPrice, subPrice, minStake, tol, quar, window)
 	if sp.IsRecurring() && subPrice != sp.SubscriptionPrice {
 		st.FeedSetDrip(feedID, dripFor(mustFeed(feedID).Spec))
 	}
 }
 
-// Sponsor pays periods of subscription and names the consumers it covers.
-func (*implV1) Sponsor(_ int, rlm realm, sponsor address, feedID uint64, periods int64, consumersCSV string, sent int64) {
+// Sponsor pays periods of a feed's subscription so it stays funded.
+func (*implV1) Sponsor(_ int, rlm realm, sponsor address, feedID uint64, periods int64, sent int64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
 	if !isServing(f) {
@@ -212,40 +213,19 @@ func (*implV1) Sponsor(_ int, rlm realm, sponsor address, feedID uint64, periods
 	if sent < required {
 		panic("gnoracle: send at least " + i(required) + StakeUnit)
 	}
-	consumers := parseAddresses(consumersCSV)
 	t := now()
 	base := t
 	if s := core.GetSponsor(feedID, sponsor); s != nil && s.PaidUntil > t {
 		base = s.PaidUntil
 	}
 	until := base + periods*param("subscriptionPeriod")
-	st.SponsorPay(feedID, sponsor, sent, until, consumers)
+	st.SponsorPay(feedID, sponsor, sent, until)
 	if until > f.PaidUntil {
 		st.FeedSetPaidUntil(feedID, until)
 	}
 	if f.Status == core.FeedUnfunded {
 		st.FeedSetStatus(feedID, core.FeedActive)
 	}
-}
-
-func parseAddresses(csv string) []address {
-	csv = strings.TrimSpace(csv)
-	if csv == "" {
-		return nil
-	}
-	parts := strings.Split(csv, ",")
-	if len(parts) > 8 {
-		panic("gnoracle: at most 8 consumers per sponsor")
-	}
-	out := make([]address, 0, len(parts))
-	for _, p := range parts {
-		a := address(strings.TrimSpace(p))
-		if !a.IsValid() {
-			panic("gnoracle: invalid consumer address " + string(a))
-		}
-		out = append(out, a)
-	}
-	return out
 }
 
 // FundBounty adds to a one-off feed's bounty.

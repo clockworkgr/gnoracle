@@ -1,5 +1,5 @@
 // Package impl is the first implementation of the Gnoracle core: feeds,
-// providers, rounds, sponsorships and metered reads. Disputes are refused
+// providers, rounds, sponsorships, realm subscriptions and reads. Disputes are refused
 // here and arrive with a later release.
 //
 // Nothing in this realm is state. Every record lives in the core realm and is

@@ -216,7 +216,7 @@ func TestProposalsActOnTheCore(cur realm, t *testing.T) {
 	epoch()
 
 	// a feed is proposed on the core; the DAO accepts it by vote
-	spec := `{"name":"GNOT/USD","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"sources":"exchanges","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":1000,"disputeWindow":43200,"readPrice":20000,"subscriptionPrice":100000000}`
+	spec := `{"name":"GNOT/USD","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"sources":"exchanges","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":1000,"disputeWindow":43200,"subscriberPrice":20000,"subscriptionPrice":100000000}`
 	testing.SetRealm(testing.NewUserRealm(stranger))
 	payCore(105 * gnot)
 	feedID := core.ProposeFeed(cross(cur), spec)

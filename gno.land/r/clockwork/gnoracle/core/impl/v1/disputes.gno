@@ -44,7 +44,8 @@ func (*implV1) Dispute(_ int, rlm realm, disputer address, feedID, roundID uint6
 	if !f.Spec.ValidValue(proposedValue) {
 		panic("gnoracle: proposed value is not a valid option")
 	}
-	if proposedValue == rd.Value {
+	roundValue := st.RoundValue(feedID, roundID)
+	if proposedValue == roundValue {
 		panic("gnoracle: the proposed value equals the round value")
 	}
 	bond := disputeBond(f, t)
@@ -54,14 +55,14 @@ func (*implV1) Dispute(_ int, rlm realm, disputer address, feedID, roundID uint6
 	if sent > bond {
 		st.CreditDeposit(disputer, sent-bond)
 	}
-	d := st.NewDispute(feedID, roundID, disputer, bond, proposedValue, tier, evidence, spec.HashText(evidence), rd.Value, rd.Tier)
+	d := st.NewDispute(feedID, roundID, disputer, bond, proposedValue, tier, evidence, spec.HashText(evidence), roundValue, rd.Tier)
 	st.RoundMarkDisputed(feedID, roundID, d.ID)
 	inRow := f.DisputesInRow
 	if t-f.LastDisputeAt >= param("disputeEscalationWindow") {
 		inRow = 0
 	}
 	st.FeedSetDisputeCounters(feedID, f.OpenDisputes+1, inRow+1, t)
-	summary := "feed " + u(feedID) + " round " + u(roundID) + ": value " + i(rd.Value) + ", proposed " + i(proposedValue) + " (" + tier + ")"
+	summary := "feed " + u(feedID) + " round " + u(roundID) + ": value " + i(roundValue) + ", proposed " + i(proposedValue) + " (" + tier + ")"
 	st.OpenBallot(d.ID, tier == tierMajor, summary)
 	return d.ID
 }
@@ -203,7 +204,7 @@ func apply(st *core.StateRef, d *core.DisputeRecord, outcome, tier string, coher
 			if holder == "" {
 				continue
 			}
-			if agg.WithinTolerance(rd.ValueAt(s), d.ProposedValue, f.Spec.ToleranceBps) {
+			if agg.WithinTolerance(st.RoundValueAt(d.Feed, d.Round, s), d.ProposedValue, f.Spec.ToleranceBps) {
 				continue
 			}
 			effTier, effBps := tier, bps

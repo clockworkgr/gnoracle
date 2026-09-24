@@ -118,7 +118,7 @@ func install(cur realm) {
 // resolvedDispute runs a feed, a round and an upheld dispute to completion
 // and returns the dispute id.
 func resolvedDispute(cur realm, tag string) uint64 {
-	spec := `{"name":"` + tag + `","kind":"recurring","valueType":"numeric","decimals":6,"interval":600,"submitWindow":300,"sources":"x","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":2000,"disputeWindow":43200,"readPrice":20000,"subscriptionPrice":100000000}`
+	spec := `{"name":"` + tag + `","kind":"recurring","valueType":"numeric","decimals":6,"interval":600,"submitWindow":300,"sources":"x","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":2000,"disputeWindow":43200,"subscriberPrice":20000,"subscriptionPrice":100000000}`
 	testing.SetRealm(testing.NewUserRealm(watcher))
 	pay(coreAddr, 105*gnot)
 	id := core.ProposeFeed(cross(cur), spec)

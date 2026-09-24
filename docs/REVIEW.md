@@ -116,6 +116,15 @@ staking).
   for the licence holder before M6.
 - **Sponsor overpayment** above `periods x subscriptionPrice` joins the pool
   rather than being refunded; documented.
+- **Metered reads removed (2026-09-24).** The permanent getters exposed
+  fresh values to any realm and to `qeval`, so per-read charges and the
+  page delay metered nothing. Reads are now free per call and side-effect
+  free, served to realms with a per-period subscription (`SubscribeRealm`),
+  to every realm on sponsored and one-off feeds, and to a feed's own realm
+  requester; the getters carry no values and the implementation reads them
+  through the `StateRef`; the pages show everything at once. Credits remain
+  only as the prepaid balance a realm requester spends on proposals,
+  bounties and subscriptions.
 - **Development-chain floors.** Added for `make demo` (2026-09-24): on a
   chain whose id is `dev` the floors of `appealWindow`, the ballot phases,
   `epochBlocks`, `upgradeTimelock` and `executionWindow` are lower, and the

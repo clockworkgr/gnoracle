@@ -1,24 +1,26 @@
 # Sponsoring a feed
 
-A sponsor pays a feed's subscription so it stays funded, and names the
-consumer realms whose reads are free. Subscriptions are the protocol's main
-revenue: 70% goes to the feed's round pools (the providers), 15% to DAO
-stakers, 15% to the treasury.
+A sponsor pays a feed's subscription so it stays funded. Subscriptions are
+the protocol's revenue: 70% goes to the feed's round pools (the providers),
+15% to DAO stakers, 15% to the treasury.
 
 ## Why sponsor
 
-- Your consumer realms read without per-read charges.
 - The feed keeps providers: a feed whose pool is empty is `unfunded`,
   providers are not paid, and after enough empty rounds it is deprecated.
 - Several sponsors can pay for the same feed; each payment extends the
   feed's coverage and adds to its pool.
+- The realms that depend on the feed keep their source. A sponsor who also
+  runs a consumer realm subscribes it separately ([CONSUMERS.md](CONSUMERS.md)),
+  or asks the requester to mark the feed `sponsored`, which makes it free
+  for every realm.
 
 ## How
 
 ```sh
 gnoracle feed 1                          # spec.subscriptionPrice per 30-day period, paidUntil, pool
-gnoracle sponsor 1 3 g1consumerA...,g1consumerB... 3000gnot
-#                 ^feed ^periods ^up to 8 consumer addresses  ^periods x subscriptionPrice
+gnoracle sponsor 1 3 3000gnot
+#                 ^feed ^periods        ^periods x subscriptionPrice
 ```
 
 `paidUntil` moves forward by the periods bought (1 to 12 at a time) and 70%

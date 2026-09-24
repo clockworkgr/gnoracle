@@ -29,9 +29,10 @@ reasons behind every number.
    median of the submissions; everyone whose submission was close enough to
    it is paid from the feed's pool.
 4. **Contracts read it.** A realm calls `Read` and gets the latest value, its
-   round and a quality tier. Reads cost a small fee per call, or nothing when
-   a sponsor pays the feed's monthly subscription and names the consumer.
-   Anyone can look at older values for free on the feed's web page.
+   round and a quality tier, inside its own transaction and at no cost per
+   call. What it needs is a subscription to the feed by the month, paid by
+   anyone on its behalf, unless the feed's requester made it free for all.
+   Every value is public on the feed's web page the moment it exists.
 5. **Anyone can dispute a round.** Post a bond, say what the value should
    have been and why. Every token holder who staked must then vote in a
    sealed two-phase ballot (commit, then reveal). If the round was wrong the
@@ -48,12 +49,12 @@ reasons behind every number.
 |---|---|---|---|---|
 | **Requester** | writes a feed specification and posts it | a 5 GNOT deposit, refunded when the feed is accepted | the feed they need | the deposit, if the request is spam |
 | **Provider** | runs an agent that submits a value every round | stake of at least 10,000 GNOT per feed, plus gas of roughly 0.02 GNOT per submission | an equal share of every round's pool they took part in, plus a 1% tip for whoever finalises a round | 0.5% of stake per missed round, jail after three misses, 5% of stake for a wrong value, all of it for a fabricated one |
-| **Consumer** | a contract that reads values | a per-read fee set by the feed (from 0.002 GNOT), half price for final values only, free when sponsored | the value, with a quality tier | nothing beyond the fee |
-| **Sponsor** | keeps a feed funded | the feed's monthly subscription (typically around 1,000 GNOT) | free reads for up to eight named consumers | nothing |
+| **Consumer** | a contract that reads values | a monthly subscription per feed, priced by the feed above a DAO floor; nothing per read; nothing at all on sponsored feeds and one-off outcomes | the value, with a quality tier, inside its own transactions | nothing beyond the subscription |
+| **Sponsor** | keeps a feed funded | the feed's monthly subscription (typically around 1,000 GNOT) | the feed keeps its providers and everyone who depends on it | nothing |
 | **Disputer** | challenges a round | a bond of at least 2,500 GNOT (10% of the feed's stake if larger, doubling for repeat disputes) | the bond back plus half of the slash when right | the bond when wrong |
-| **DAO member** | stakes PYTH, votes on requests and parameters, must vote on every dispute | nothing to join beyond the tokens | 15% of all subscriptions and read fees, plus a share of forfeited bonds and slashes | 0.5% of stake per ballot missed or voted against the outcome, capped at 5% a month |
+| **DAO member** | stakes PYTH, votes on requests and parameters, must vote on every dispute | nothing to join beyond the tokens | 15% of all subscription payments, plus a share of forfeited bonds and slashes | 0.5% of stake per ballot missed or voted against the outcome, capped at 5% a month |
 
-Of every subscription or read fee, 70% goes to the providers of that feed,
+Of every subscription payment, 70% goes to the providers of that feed,
 15% to the DAO's stakers and 15% to the DAO treasury.
 
 ## How a feed lives
@@ -120,7 +121,7 @@ fees and the right and duty to vote.
 
 On the chain (gno.land realms):
 
-- **core**: feeds, rounds, providers, consumer credits, disputes, and all
+- **core**: feeds, rounds, providers, subscriptions, disputes, and all
   the GNOT they involve.
 - **dao**: PYTH staking, proposals, dispute ballots, the treasury.
 - **token**: PYTH itself.

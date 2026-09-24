@@ -1,29 +1,66 @@
 package impl
 
 import (
+	"strings"
+
 	"gno.land/p/clockwork/gnoracle/rounds/v0"
 	"gno.land/r/clockwork/gnoracle/core"
 )
 
-// DepositFor credits a consumer.
-func (*implV1) DepositFor(_ int, rlm realm, consumer address, sent int64) {
+// DepositFor adds to an account's prepaid balance (a realm requester's
+// operator funds it this way; reads never touch it).
+func (*implV1) DepositFor(_ int, rlm realm, account address, sent int64) {
 	st := core.Store(0, rlm)
 	if sent <= 0 {
-		panic("gnoracle: send the credit with the call")
+		panic("gnoracle: send the amount with the call")
 	}
-	st.CreditDeposit(consumer, sent)
+	st.CreditDeposit(account, sent)
 }
 
-// WithdrawCredit returns unspent credit.
-func (*implV1) WithdrawCredit(_ int, rlm realm, consumer address, amount int64) {
+// WithdrawCredit returns unspent prepaid balance.
+func (*implV1) WithdrawCredit(_ int, rlm realm, account address, amount int64) {
 	st := core.Store(0, rlm)
-	st.CreditWithdraw(consumer, amount)
+	st.CreditWithdraw(account, amount)
 }
 
-// SetFinalOnly toggles a consumer's read mode.
-func (*implV1) SetFinalOnly(_ int, rlm realm, consumer address, on bool) {
+// SubscribeRealm pays periods of a recurring feed's subscriberPrice for a
+// realm. Overpayment joins the pool like a sponsor's.
+func (*implV1) SubscribeRealm(_ int, rlm realm, payer address, payerPkg string, feedID uint64, pkgPath string, periods int64, sent int64) {
 	st := core.Store(0, rlm)
-	st.CreditSetFinalOnly(consumer, on)
+	f := mustFeed(feedID)
+	if !isServing(f) {
+		panic("gnoracle: feed is not active")
+	}
+	if !f.Spec.IsRecurring() {
+		panic("gnoracle: a one-off outcome is open to every realm once final; there is nothing to subscribe to")
+	}
+	if f.Spec.Sponsored {
+		panic("gnoracle: a sponsored feed is free for every realm; there is nothing to subscribe to")
+	}
+	if !strings.HasPrefix(pkgPath, "gno.land/r/") || len(pkgPath) > 128 {
+		panic("gnoracle: pkgPath must be the reading realm's gno.land/r/ path")
+	}
+	if periods < 1 || periods > 12 {
+		panic("gnoracle: periods must be between 1 and 12")
+	}
+	required := f.Spec.SubscriberPrice * periods
+	t := now()
+	base := t
+	if s := core.GetSubscription(feedID, pkgPath); s != nil && s.PaidUntil > t {
+		base = s.PaidUntil
+	}
+	until := base + periods*param("subscriptionPeriod")
+	if payerPkg != "" {
+		if sent != 0 {
+			panic("gnoracle: a realm cannot attach coins; its prepaid balance pays")
+		}
+		st.SubscribeFromCredit(payer, feedID, pkgPath, required, until)
+		return
+	}
+	if sent < required {
+		panic("gnoracle: send at least " + i(required) + StakeUnit + " (" + i(periods) + " x subscriberPrice " + i(f.Spec.SubscriberPrice) + ")")
+	}
+	st.SubscribePay(feedID, pkgPath, sent, until)
 }
 
 // servedTier is the tier a feed's latest value is served under at time t.
@@ -46,83 +83,127 @@ func servedTier(f *core.Feed, t int64) string {
 	return tier
 }
 
-// charge debits the read fee unless a sponsor or the spec covers it.
-func charge(st *core.StateRef, consumer address, f *core.Feed, finalOnly bool, t int64) {
-	if f.Spec.Sponsored || f.Spec.ReadPrice == 0 {
-		st.CreditCountRead(consumer)
+// mayRead is the on-chain gate. Reads serve realms (people have the pages,
+// which show everything); a one-off outcome and a sponsored feed serve every
+// realm; a feed's own realm requester always may read it; any other realm
+// needs a subscription that covers now.
+func mayRead(f *core.Feed, caller address, callerPkg string, t int64) {
+	if callerPkg == "" {
+		panic("gnoracle: Read serves realms; accounts and people use the pages and the :json views, which show every value")
+	}
+	if !f.Spec.IsRecurring() || f.Spec.Sponsored {
 		return
 	}
-	if s := core.SponsorOf(f.ID, consumer); s != nil && s.PaidUntil >= t {
-		st.CreditCountRead(consumer)
+	if f.FromRealm && f.Proposer == caller {
 		return
 	}
-	fee := f.Spec.ReadPrice
-	if finalOnly {
-		fee = fee * param("readPriceFinalBps") / 10_000
+	if !core.IsSubscribed(f.ID, callerPkg, t) {
+		panic("gnoracle: " + callerPkg + " is not subscribed to feed " + u(f.ID) + " (SubscribeRealm)")
 	}
-	if fee == 0 {
-		st.CreditCountRead(consumer)
-		return
+}
+
+func mustServing(f *core.Feed) {
+	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
+		panic("gnoracle: feed is not active")
 	}
-	st.CreditCharge(consumer, f.ID, fee)
 }
 
 // Read returns the latest served value.
 //
 // The latest aggregate is served with its tier. While the latest round is
 // disputed, and after it was voided, the last final round is served instead
-// (a captured vote can freeze the feed but not inject a value, plan §7.1); a
-// finalOnly consumer always gets the last final round. Nothing is charged
-// when nothing is served.
-func (*implV1) Read(_ int, rlm realm, consumer address, feedID uint64) (int64, int64, uint64, int64, string) {
+// (a captured vote can freeze the feed but not inject a value, plan §7.1).
+// Nothing is written: the last final round is computed as of now.
+func (*implV1) Read(_ int, rlm realm, caller address, callerPkg string, feedID uint64) (int64, int64, uint64, int64, string) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
-	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
-		panic("gnoracle: feed is not active")
-	}
+	mustServing(f)
 	t := now()
+	mayRead(f, caller, callerPkg, t)
 	dec := int64(f.Spec.Decimals)
-	c := core.GetCredit(consumer)
-	finalOnly := c != nil && c.FinalOnly
-	st.FeedPromoteFinal(feedID)
-	f = mustFeed(feedID)
 	tier := servedTier(f, t)
 	suffix := ""
 	if f.Status == core.FeedUnfunded {
 		suffix = ",unfunded"
 	}
 	switch {
-	case finalOnly:
-		if !f.HaveFinal {
-			return 0, dec, 0, 0, "none"
-		}
-		charge(st, consumer, f, true, t)
-		return f.FinalValue, dec, f.FinalRound, f.FinalAt, "final" + suffix
 	case !f.HaveValue:
 		return 0, dec, 0, 0, tier
 	case f.LastTier == "disputed" || f.LastTier == "void":
-		if !f.HaveFinal {
+		fv, fr, fa, ok := latestFinal(st, f, t)
+		if !ok {
 			return 0, dec, 0, 0, tier
 		}
-		charge(st, consumer, f, false, t)
 		if f.LastTier == "void" {
 			tier = "final" + suffix
 		}
-		return f.FinalValue, dec, f.FinalRound, f.FinalAt, tier
+		return fv, dec, fr, fa, tier
 	}
-	charge(st, consumer, f, false, t)
-	return f.LastValue, dec, f.LastRound, f.LastRoundAt, tier
+	last, _ := st.FeedValues(feedID)
+	return last, dec, f.LastRound, f.LastRoundAt, tier
+}
+
+// ReadFinal returns the latest final round, whatever later rounds are doing.
+func (*implV1) ReadFinal(_ int, rlm realm, caller address, callerPkg string, feedID uint64) (int64, int64, uint64, int64, string) {
+	st := core.Store(0, rlm)
+	f := mustFeed(feedID)
+	mustServing(f)
+	t := now()
+	mayRead(f, caller, callerPkg, t)
+	dec := int64(f.Spec.Decimals)
+	fv, fr, fa, ok := latestFinal(st, f, t)
+	if !ok {
+		return 0, dec, 0, 0, "none"
+	}
+	tier := "final"
+	if f.Status == core.FeedUnfunded {
+		tier += ",unfunded"
+	}
+	return fv, dec, fr, fa, tier
+}
+
+// latestFinal is the last final round as of t, computed without writing:
+// the promoted value, then any rounds past the cursor whose dispute window
+// has closed with no dispute standing (the write paths promote them later).
+func latestFinal(st *core.StateRef, f *core.Feed, t int64) (value int64, round uint64, at int64, ok bool) {
+	_, value = st.FeedValues(f.ID)
+	round, at, ok = f.FinalRound, f.FinalAt, f.HaveFinal
+	if !f.HaveLast {
+		return
+	}
+	rid := f.FinalCursor
+	for k := 0; k < 64 && rid <= f.LastFinalized; k++ {
+		rd := core.GetRound(f.ID, rid)
+		if rd == nil {
+			rid++
+			continue
+		}
+		if rd.Status == core.RoundOpen {
+			break
+		}
+		if rd.Status == core.RoundAggregated {
+			if rd.FinalisedAt+f.Spec.DisputeWindow > t {
+				break
+			}
+			if rd.DisputeID != 0 {
+				if d := core.GetDispute(rd.DisputeID); d != nil && d.Status != core.DisputeResolved {
+					break
+				}
+			}
+			value, round, at, ok = st.RoundValue(f.ID, rid), rid, rd.FinalisedAt, true
+		}
+		rid++
+	}
+	return
 }
 
 // ReadRound returns one round.
-func (*implV1) ReadRound(_ int, rlm realm, consumer address, feedID, roundID uint64) (int64, string, int64) {
+func (*implV1) ReadRound(_ int, rlm realm, caller address, callerPkg string, feedID, roundID uint64) (int64, string, int64) {
 	st := core.Store(0, rlm)
 	f := mustFeed(feedID)
-	if f.Status == core.FeedProposed || f.Status == core.FeedDeprecated {
-		panic("gnoracle: feed is not active")
-	}
+	mustServing(f)
 	t := now()
-	charge(st, consumer, f, false, t)
+	mayRead(f, caller, callerPkg, t)
 	rd := core.GetRound(feedID, roundID)
 	if rd == nil || rd.Status == core.RoundOpen {
 		return 0, "none", 0
@@ -134,7 +215,7 @@ func (*implV1) ReadRound(_ int, rlm realm, consumer address, feedID, roundID uin
 	if rd.Status != core.RoundAggregated {
 		tier = rd.Status
 	}
-	return rd.Value, tier, rd.FinalisedAt
+	return st.RoundValue(feedID, roundID), tier, rd.FinalisedAt
 }
 
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }

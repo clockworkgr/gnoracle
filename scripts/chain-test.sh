@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives a running gnodev (make dev) through a feed lifecycle with real
 # transactions: accept the implementation, propose and activate a one-minute
-# price feed, bond two providers, submit, finalise, deposit credit and read.
+# price feed, bond two providers, submit, finalise, subscribe a reader realm.
 # Uses the throwaway test1 key in .dev-keys (make dev-keys) and a second key
 # it funds. Prints each step; exits non-zero on the first failure.
 set -euo pipefail
@@ -67,7 +67,7 @@ done
 echo "floor: $FLOOR"
 
 step "propose a one-minute price feed (deposit 5 + first period 100 GNOT)"
-SPEC='{"name":"DEMO/USD","description":"gnodev smoke feed","kind":"recurring","valueType":"numeric","decimals":6,"interval":60,"submitWindow":60,"sources":"Any number; this is a demo.","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":1000,"disputeWindow":7200,"readPrice":20000,"subscriptionPrice":100000000}'
+SPEC='{"name":"DEMO/USD","description":"gnodev smoke feed","kind":"recurring","valueType":"numeric","decimals":6,"interval":60,"submitWindow":60,"sources":"Any number; this is a demo.","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":1000,"disputeWindow":7200,"subscriberPrice":10000000,"subscriptionPrice":100000000}'
 send_call test1 ProposeFeed 105000000ugnot "$SPEC"
 FEED="$(qeval "$CORE.FeedCount()" | grep -oE '[0-9]+' | head -1)"
 echo "feed id: $FEED"
@@ -109,9 +109,10 @@ done
 plain_call test1 Submit "$FEED" 1 1001000
 plain_call prov2 Submit "$FEED" 1 1002000
 
-step "deposit credit and read"
-send_call test1 DepositFor 1000000ugnot "$TEST1"
-plain_call test1 Read "$FEED"
+step "subscribe the example reader realm to the feed (10 GNOT per period) and list the subscribers"
+READER="gno.land/r/$NS/gnoracle/demo/reader"
+send_call test1 SubscribeRealm 10000000ugnot "$FEED" "$READER" 1
+echo "subscribers: $(qrender "$CORE" "json/feed/$FEED/subscribers")"
 
 step "DAO: accept its implementation, stake PYTH, sync fees, open and vote a proposal"
 DAO="gno.land/r/$NS/gnoracle/dao"

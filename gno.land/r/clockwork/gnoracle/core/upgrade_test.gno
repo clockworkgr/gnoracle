@@ -16,6 +16,10 @@ const implPathB = "gno.land/r/clockwork/gnoracle/core/impl/v2"
 // stranger cannot do any of it.
 func TestUpgradeRollbackKeepsState(cur realm, t *testing.T) {
 	install(cur)
+	// a subscribed reader realm, so a read can be tried through each release
+	testing.SetRealm(testing.NewUserRealm(consumer))
+	pay(1 * gnot)
+	core.SubscribeRealm(cross(cur), 1, readerPath, 1)
 	feedsBefore := core.FeedCount()
 	heldBefore := core.HeldTotal()
 	uassert.True(t, feedsBefore > 0) // earlier stories left feeds behind
@@ -42,10 +46,10 @@ func TestUpgradeRollbackKeepsState(cur realm, t *testing.T) {
 	uassert.Equal(t, heldBefore, core.HeldTotal())
 	health(t)
 
-	// the new release serves; a read still works through it
+	// the new release serves; a subscribed realm's read still works through it
 	page := core.Render(cross(cur), "feeds")
 	uassert.True(t, strings.HasPrefix(page, "<!-- release: impl/v2 -->"))
-	testing.SetRealm(testing.NewUserRealm(consumer))
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	nosend()
 	_, _, _, _, tier := core.Read(cross(cur), 1)
 	uassert.True(t, tier != "")

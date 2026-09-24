@@ -35,7 +35,9 @@ var (
 	dave      = address("g1dave0000000000000000000000000000000000")
 	consumer  = address("g1consumer000000000000000000000000000000")
 	stranger  = address("g1stranger000000000000000000000000000000")
-	coreAddr  = chain.PackageAddress(corePath)
+	// the consumer realm of the stories: subscribed by the consumer account
+	readerPath = "gno.land/r/demo/reader"
+	coreAddr   = chain.PackageAddress(corePath)
 )
 
 func coins(n int64) chain.Coins { return chain.NewCoins(chain.NewCoin("ugnot", n)) }
@@ -92,7 +94,7 @@ func priceSpec(interval, window, minStake, price, sub int64) string {
 		`"interval":` + strconv.FormatInt(interval, 10) + `,"submitWindow":` + strconv.FormatInt(window, 10) + `,` +
 		`"sources":"Median of three exchanges at round start.","minProviders":2,"maxProviders":5,` +
 		`"providerMinStake":` + strconv.FormatInt(minStake, 10) + `,"toleranceBps":100,"quarantineBps":1000,` +
-		`"disputeWindow":43200,"readPrice":` + strconv.FormatInt(price, 10) + `,"subscriptionPrice":` + strconv.FormatInt(sub, 10) + `}`
+		`"disputeWindow":43200,"subscriberPrice":` + strconv.FormatInt(price, 10) + `,"subscriptionPrice":` + strconv.FormatInt(sub, 10) + `}`
 }
 
 func health(t *testing.T) {
@@ -168,22 +170,29 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.AbortsContains(t, cur, "has not opened", func() { core.Submit(cross(cur), id, 0, 1_000_000) })
 	skip(f.StartAt - core.Now() + 1)
 
-	// nothing is served yet, so nothing is charged, credit or not
+	// reads serve subscribed realms: an account is sent to the pages, an
+	// unsubscribed realm is refused, then the consumer pays a period for its
+	// reader realm (20000 per period here; the excess joins the pool)
 	testing.SetRealm(testing.NewUserRealm(consumer))
 	nosend()
-	_, _, _, _, tier0 := core.Read(cross(cur), id)
-	uassert.Equal(t, "none", tier0)
+	uassert.AbortsContains(t, cur, "Read serves realms", func() { core.Read(cross(cur), id) })
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
+	uassert.AbortsContains(t, cur, "not subscribed", func() { core.Read(cross(cur), id) })
 	testing.SetRealm(testing.NewUserRealm(consumer))
 	pay(1 * gnot)
-	core.DepositFor(cross(cur), consumer)
-	testing.SetRealm(testing.NewUserRealm(consumer))
-	nosend()
+	core.SubscribeRealm(cross(cur), id, readerPath, 1)
+	uassert.True(t, core.IsSubscribed(id, readerPath, core.Now()))
+	sub := core.GetSubscription(id, readerPath)
+	uassert.Equal(t, int64(1*gnot), sub.Paid)
+	uassert.Equal(t, core.Now()+core.Param("subscriptionPeriod"), sub.PaidUntil)
+	health(t)
+	// nothing is served yet
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	v, dec, rid, _, tier := core.Read(cross(cur), id)
 	uassert.Equal(t, "none", tier)
 	uassert.Equal(t, int64(6), dec)
 	uassert.Equal(t, int64(0), v)
 	uassert.Equal(t, uint64(0), rid)
-	uassert.Equal(t, int64(1*gnot), core.GetCredit(consumer).Balance)
 
 	// submissions: alice and bob agree, carol is 5% off (outside 1% tolerance)
 	testing.SetRealm(testing.NewUserRealm(alice))
@@ -201,13 +210,16 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 
 	rd := core.GetRound(id, 0)
 	uassert.Equal(t, core.RoundAggregated, rd.Status)
-	uassert.Equal(t, int64(1_005_000), rd.Value) // lower median of 3 is the middle value
 	uassert.Equal(t, uint32(0b011), rd.EligibleMask)
 	uassert.Equal(t, "consensus", rd.Tier) // 2 of 3 eligible, no last value
 	f = core.GetFeed(id)
 	uassert.True(t, f.HaveValue)
-	uassert.Equal(t, int64(1_005_000), f.LastValue)
 	uassert.Equal(t, uint64(0), f.LastFinalized)
+	// the round's value is not public state: a subscribed realm reads it
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
+	rv, rtier, _ := core.ReadRound(cross(cur), id, 0)
+	uassert.Equal(t, int64(1_005_000), rv) // lower median of 3 is the middle value
+	uassert.Equal(t, "consensus", rtier)
 	// carol earned a strike, no reward; alice and bob split the pool
 	uassert.Equal(t, int64(1), core.GetProvider(id, carol).Strikes)
 	uassert.Equal(t, int64(0), core.GetProvider(id, carol).Rewards)
@@ -215,19 +227,18 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	uassert.Equal(t, core.GetProvider(id, alice).Rewards, core.GetProvider(id, bob).Rewards)
 	health(t)
 
-	// the consumer now reads a consensus value and pays the read price
-	testing.SetRealm(testing.NewUserRealm(consumer))
-	nosend()
+	// the subscribed realm reads a consensus value; nothing is charged per read
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	v, _, rid, at, tier := core.Read(cross(cur), id)
 	uassert.Equal(t, int64(1_005_000), v)
 	uassert.Equal(t, uint64(0), rid)
 	uassert.Equal(t, f.StartAt, at)
 	uassert.Equal(t, "consensus", tier)
-	uassert.Equal(t, int64(1*gnot-20_000), core.GetCredit(consumer).Balance)
-	// a reader without credit is refused once there is something to serve
-	testing.SetRealm(testing.NewUserRealm(stranger))
-	nosend()
-	uassert.AbortsContains(t, cur, "insufficient credit", func() { core.Read(cross(cur), id) })
+	uassert.Equal(t, int64(1*gnot), core.GetSubscription(id, readerPath).Paid)
+	// another realm is still refused, and the page shows the value to everyone
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/demo/other"))
+	uassert.AbortsContains(t, cur, "not subscribed", func() { core.Read(cross(cur), id) })
+	uassert.True(t, strings.Contains(core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10)), "1.005000"))
 
 	// --- round 1: only alice submits; window closes; anyone finalises
 	skip(3600)
@@ -249,8 +260,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	health(t)
 
 	// the served value is still round 0, now aging toward final
-	testing.SetRealm(testing.NewUserRealm(consumer))
-	nosend()
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	v, _, rid, _, tier = core.Read(cross(cur), id)
 	uassert.Equal(t, uint64(0), rid)
 	uassert.Equal(t, "consensus", tier)
@@ -268,18 +278,27 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 	core.Submit(cross(cur), id, 2, 1_199_000)
 	rd = core.GetRound(id, 2)
 	uassert.Equal(t, "consensus", rd.Tier) // no final value exists yet (round 0's window is 12 h), so there is no quarantine reference
-	uassert.Equal(t, int64(1_200_000), rd.Value)
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
+	rv, _, _ = core.ReadRound(cross(cur), id, 2)
+	uassert.Equal(t, int64(1_200_000), rv)
 	uassert.Equal(t, int64(0), core.GetProvider(id, bob).ConsecutiveMisses) // reset on submit
 	health(t)
 
-	// --- after the dispute window the value is final; the free view then shows it
+	// --- the page shows the value at once (chain state is public); after the
+	// dispute window the value is final, and ReadFinal serves it
 	rendered := core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10))
-	uassert.True(t, strings.Contains(rendered, "(fresh; read on-chain)"))
+	uassert.True(t, strings.Contains(rendered, "1.200000"))
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
+	_, _, _, _, ftier := core.ReadFinal(cross(cur), id)
+	uassert.Equal(t, "none", ftier) // nothing final yet
 	skip(43200 + 601)
-	testing.SetRealm(testing.NewUserRealm(consumer))
-	nosend()
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	_, _, _, _, tier = core.Read(cross(cur), id)
 	uassert.Equal(t, "stale", tier) // final, but no round for 12 h: staleness wins
+	fv, _, fr, _, ftier := core.ReadFinal(cross(cur), id)
+	uassert.Equal(t, int64(1_200_000), fv)
+	uassert.Equal(t, uint64(2), fr)
+	uassert.Equal(t, "final", ftier)
 	rendered = core.Render(cross(cur), "feed/"+strconv.FormatUint(id, 10))
 	uassert.True(t, strings.Contains(rendered, "1.200000"))
 
@@ -306,7 +325,7 @@ func TestPriceFeedLifecycle(cur realm, t *testing.T) {
 func TestMissesJailAndUnbond(cur realm, t *testing.T) {
 	install(cur)
 	spec := priceSpec(600, 300, 1_000*gnot, 0, 100*gnot)
-	spec = strings.Replace(spec, `"readPrice":0`, `"readPrice":0,"sponsored":true`, 1)
+	spec = strings.Replace(spec, `"subscriberPrice":0`, `"subscriberPrice":0,"sponsored":true`, 1)
 	testing.SetRealm(testing.NewUserRealm(requester))
 	pay(105 * gnot)
 	id := core.ProposeFeed(cross(cur), spec)
@@ -392,7 +411,7 @@ func TestOneOffFeedFromTrustedRequester(cur realm, t *testing.T) {
 	spec := `{"name":"Election 2026","kind":"oneoff","valueType":"categorical","options":["Yes","No","Invalid"],` +
 		`"resolveAt":` + strconv.FormatInt(resolveAt, 10) + `,"submitWindow":600,"bounty":50000000,` +
 		`"sources":"Official results page.","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,` +
-		`"disputeWindow":259200,"readPrice":2000,"valueAtStake":1000000000}`
+		`"disputeWindow":259200,"valueAtStake":1000000000}`
 
 	// a realm proposes without coins: it needs credit and, to self-activate, trust
 	testing.SetRealm(testing.NewUserRealm(consumer))
@@ -435,17 +454,23 @@ func TestOneOffFeedFromTrustedRequester(cur realm, t *testing.T) {
 
 	rd := core.GetRound(id2, 0)
 	uassert.Equal(t, core.RoundAggregated, rd.Status)
-	uassert.Equal(t, int64(1), rd.Value)
+	testing.SetRealm(testing.NewCodeRealm(market))
+	mv, _, _ := core.ReadRound(cross(cur), id2, 0)
+	uassert.Equal(t, int64(1), mv)
 	uassert.Equal(t, "consensus", rd.Tier)
 	// the whole bounty minus the 1% tip is split between the two
 	uassert.Equal(t, int64(50*gnot-50*gnot/100)/2, core.GetProvider(id2, alice).Rewards)
 
-	// the market realm reads its outcome (charged 2000 from its credit)
+	// the market realm reads its outcome; a one-off outcome is open to every
+	// realm and nothing is charged
 	testing.SetRealm(testing.NewCodeRealm(market))
 	v, _, _, _, tier := core.Read(cross(cur), id2)
 	uassert.Equal(t, int64(1), v)
 	uassert.Equal(t, "consensus", tier)
-	uassert.Equal(t, int64(95*gnot-2000), core.GetCredit(marketAddr).Balance)
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/demo/other"))
+	v, _, _, _, _ = core.Read(cross(cur), id2)
+	uassert.Equal(t, int64(1), v)
+	uassert.Equal(t, int64(95*gnot), core.GetCredit(marketAddr).Balance)
 	health(t)
 }
 

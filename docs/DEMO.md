@@ -26,7 +26,7 @@ The script prints a link to each page as it comes to life; gnoweb is at
 | Clocks | Kourt's test clock is armed; the ballot, appeal and epoch clocks are shortened (table below) | the `:params` pages |
 | Keys | three provider keys, two member keys, a challenger, a bot key and a poller key are created in `.dev-keys/` and funded | |
 | Members | `test1`, `voter1` and `voter2` each stake 100,000 PYTH; their weight counts from the next epoch (ten blocks here) | `dao:members` |
-| Feed | `DEMO/USD` (one-minute rounds) is proposed and activated; the three providers register 1,000 GNOT each; 10 GNOT of read credit is deposited for the reader realm | `core:feed/1`, `core:consumer/<reader address>` |
+| Feed | `DEMO/USD` (one-minute rounds) is proposed and activated; the three providers register 1,000 GNOT each; the reader realm is subscribed for one period (10 GNOT) | `core:feed/1`, `core:feed/1/subscribers` |
 | Live phase | three agents (http and exec adapters) submit every round, the bot announces finalisations, and the reader realm polls the feed every 20 s, keeping each value with its block height | `core:feed/1/rounds`, `demo/reader`, `.dev-agent/demo/bot.log` |
 | Dispute | the challenger contests the round the reader last read, proposing a value 5% higher (minor tier, 2,500 GNOT bond); the ballot opens | `core:dispute/1` |
 | Ballot | the three members commit `UPHOLD`, reveal when the phase turns, the ballot is counted, the appeal window passes, the dispute resolves: the challenger forfeits the bond | `core:dispute/1`, `dao:member/<address>` |
@@ -51,7 +51,6 @@ entry point, which refuses on any other chain.
 | `core.appealWindow` | 24 h | 30 s | guardian `SetParam` (dev floor 10 s; 1 h elsewhere) |
 | `dao.epochBlocks` | 720 blocks, fixed | 10 blocks | `DevSetParam` (dev floor 10; fixed elsewhere) |
 | `core.providerMinStakeFloor` | 10,000 GNOT | 1,000 GNOT | guardian `SetParam` (within the ordinary bounds) |
-| `core.renderDelay` | 600 s | 0 | guardian `SetParam` (within the ordinary bounds), so pages show values at once |
 | Kourt v3: three epochs of stake history before an answer, 72 h before an undisputed settlement | | skipped | Kourt's own test clock (`EnableTestClock`, `AdvanceTestHeight`, `AdvanceTestClock`), which only the realm's deployer may arm, only before the court exists |
 
 Each change obeys the parameters' 50%-per-block rate limit, so the script
@@ -67,11 +66,11 @@ and the settlement 72 hours later. `RESET=1` gives a clean chain.
 
 - **`core:feed/1`** shows the feed, its providers and the latest value;
   `core:feed/1/rounds` every round with who submitted what.
-- **`demo/reader`** is the example consumer realm: its address, the read
-  credit left, and every reading with the block height and chain time it was
-  taken at. Its source is `gno.land/r/clockwork/gnoracle/demo/reader`; any
-  realm reads the same way (`core.Read` through a crossing call, paid from
-  credit deposited for its address).
+- **`demo/reader`** is the example consumer realm: its path, its
+  subscription, and every reading with the block height and chain time it
+  was taken at. Its source is `gno.land/r/clockwork/gnoracle/demo/reader`;
+  any realm reads the same way (`core.Read` through a crossing call, served
+  because the realm is subscribed to the feed; nothing per read).
 - **`core:dispute/1`** shows the challenge, the ballot's tally once counted,
   the outcome, the bond's fate and the Kourt link.
 - **`kourtv3:gnoracle`** is the DAO's court on Kourt; **`kourtv3:gnoracle/1`**

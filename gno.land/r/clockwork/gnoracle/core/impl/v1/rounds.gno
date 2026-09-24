@@ -177,7 +177,7 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 		holders[s] = p
 		obliged++
 		if rd.SubmittedMask&(1<<uint(s)) != 0 {
-			subs.Values[s] = rd.ValueAt(s)
+			subs.Values[s] = st.RoundValueAt(f.ID, id, s)
 			subs.Present[s] = true
 		}
 	}
@@ -209,9 +209,10 @@ func finalise(st *core.StateRef, rlm realm, f *core.Feed, id uint64, cranker add
 		// aggregate (a provisional jump must not become the reference)
 		st.FeedPromoteFinal(f.ID)
 		f = mustFeed(f.ID)
+		_, lastFinal := st.FeedValues(f.ID)
 		tier = agg.DecideTier(agg.TierInput{
 			Eligible: count, Active: obliged, MinProviders: sp.MinProviders,
-			Value: value, LastFinal: f.FinalValue, HaveLast: f.HaveFinal, QuarantineBps: sp.QuarantineBps,
+			Value: value, LastFinal: lastFinal, HaveLast: f.HaveFinal, QuarantineBps: sp.QuarantineBps,
 			Categorical: !sp.IsNumeric(),
 		})
 	}

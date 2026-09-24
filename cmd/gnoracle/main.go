@@ -50,6 +50,7 @@ Reads
   provider <feed> <addr> | providers <feed>
   dispute <id> | disputes | ballot <dispute> | member <addr> | proposal <id>
   params [core|dao] | health | kourt <dispute>
+  subscribers <feed> | subscription <feed> <realm-path>
   commitment <dispute> <round> <choice> <salt> <voter>   compute a commitment offline
 
 Provider (signs)
@@ -58,11 +59,11 @@ Provider (signs)
   submit <feed> <round|current> <value>   value in feed units (e.g. 1.2345) or an option label
   finalize <feed> [max-rounds]    CatchUp
 
-Consumer and requester (signs)
-  deposit <amount> [consumer]     DepositFor
-  read <feed>                     paid Read; prints the value
+Consumer, sponsor and requester (signs)
+  subscribe <feed> <realm-path> <periods> <amount>   SubscribeRealm: the realm may Read the feed for the periods paid
+  sponsor <feed> <periods> <amount>                  keep a feed funded (periods x subscriptionPrice)
+  deposit <amount> [account]      DepositFor: prepaid balance of a realm requester (feed requests, bounties, subscriptions)
   propose-feed <spec.json> <deposit>
-  sponsor <feed> <periods> <consumers,csv> <amount>
   dispute-open <feed> <round> <value> <minor|major> <evidence> <bond>
   appeal <dispute> <bond> | resolve <dispute>
 
@@ -345,6 +346,16 @@ func (c *cli) run(cmd string, a []string) error {
 			return err
 		}
 		return c.view(c.kourt, "record/"+a[0])
+	case "subscribers":
+		if err := need(a, 1, "subscribers <feed>"); err != nil {
+			return err
+		}
+		return c.view(c.core, "feed/"+a[0]+"/subscribers")
+	case "subscription":
+		if err := need(a, 2, "subscription <feed> <realm-path>"); err != nil {
+			return err
+		}
+		return c.view(c.core, "feed/"+a[0]+"/subscription/"+a[1])
 	case "commitment":
 		if err := need(a, 5, "commitment <dispute> <round> <choice> <salt> <voter>"); err != nil {
 			return err
@@ -426,7 +437,7 @@ func (c *cli) run(cmd string, a []string) error {
 
 	// ---- consumer / requester
 	case "deposit":
-		if err := need(a, 1, "deposit <amount> [consumer]"); err != nil {
+		if err := need(a, 1, "deposit <amount> [account]"); err != nil {
 			return err
 		}
 		amt, err := amount(a[0])
@@ -442,11 +453,16 @@ func (c *cli) run(cmd string, a []string) error {
 		}
 		c.send = amt
 		return c.tx(c.core, "DepositFor", consumer)
-	case "read":
-		if err := need(a, 1, "read <feed>"); err != nil {
+	case "subscribe":
+		if err := need(a, 4, "subscribe <feed> <realm-path> <periods> <amount>"); err != nil {
 			return err
 		}
-		return c.tx(c.core, "Read", a[0])
+		amt, err := amount(a[3])
+		if err != nil {
+			return err
+		}
+		c.send = amt
+		return c.tx(c.core, "SubscribeRealm", a[0], a[1], a[2])
 	case "propose-feed":
 		if err := need(a, 2, "propose-feed <spec.json> <deposit>"); err != nil {
 			return err
@@ -465,15 +481,15 @@ func (c *cli) run(cmd string, a []string) error {
 		c.send = dep
 		return c.tx(c.core, "ProposeFeed", string(spec))
 	case "sponsor":
-		if err := need(a, 4, "sponsor <feed> <periods> <consumers,csv> <amount>"); err != nil {
+		if err := need(a, 3, "sponsor <feed> <periods> <amount>"); err != nil {
 			return err
 		}
-		amt, err := amount(a[3])
+		amt, err := amount(a[2])
 		if err != nil {
 			return err
 		}
 		c.send = amt
-		return c.tx(c.core, "Sponsor", a[0], a[1], a[2])
+		return c.tx(c.core, "Sponsor", a[0], a[1])
 	case "dispute-open":
 		if err := need(a, 6, "dispute-open <feed> <round> <value> <minor|major> <evidence> <bond>"); err != nil {
 			return err

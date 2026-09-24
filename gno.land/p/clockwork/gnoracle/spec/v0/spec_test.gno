@@ -12,7 +12,7 @@ import (
 const now = int64(1_700_000_000)
 
 func limits() spec.Limits {
-	return spec.Limits{ProviderMinStakeFloor: 10_000_000_000, ReadPriceFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000}
+	return spec.Limits{ProviderMinStakeFloor: 10_000_000_000, SubscriberFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000}
 }
 
 const priceFeed = `{
@@ -30,12 +30,12 @@ const priceFeed = `{
   "toleranceBps": 100,
   "quarantineBps": 1000,
   "disputeWindow": 43200,
-  "readPrice": 20000,
+  "subscriberPrice": 20000,
   "subscriptionPrice": 1000000000,
   "tags": ["price", "gnot"]
 }`
 
-const outcomeFeed = `{"name":"Election 2026","kind":"oneoff","valueType":"categorical","options":["Yes","No","Invalid"],"resolveAt":1700100000,"submitWindow":86400,"bounty":50000000,"sources":"Official results page of the electoral commission.","minProviders":3,"maxProviders":5,"providerMinStake":10000000000,"disputeWindow":259200,"readPrice":2000}`
+const outcomeFeed = `{"name":"Election 2026","kind":"oneoff","valueType":"categorical","options":["Yes","No","Invalid"],"resolveAt":1700100000,"submitWindow":86400,"bounty":50000000,"sources":"Official results page of the electoral commission.","minProviders":3,"maxProviders":5,"providerMinStake":10000000000,"disputeWindow":259200}`
 
 func TestParsePriceFeed(t *testing.T) {
 	s, err := spec.Parse(priceFeed, now, limits())
@@ -52,7 +52,7 @@ func TestParsePriceFeed(t *testing.T) {
 	uassert.Equal(t, int64(100), s.ToleranceBps)
 	uassert.Equal(t, int64(1000), s.QuarantineBps)
 	uassert.Equal(t, int64(43200), s.DisputeWindow)
-	uassert.Equal(t, int64(20000), s.ReadPrice)
+	uassert.Equal(t, int64(20000), s.SubscriberPrice)
 	uassert.Equal(t, int64(1_000_000_000), s.SubscriptionPrice)
 	uassert.Equal(t, 2, len(s.Tags))
 	uassert.Equal(t, priceFeed, s.Text)
@@ -152,7 +152,7 @@ func TestValidationRules(t *testing.T) {
 	expectErr(t, mutate(priceFeed, "quarantineBps", `50`), "quarantineBps must be between")
 	expectErr(t, mutate(priceFeed, "disputeWindow", `7199`), "disputeWindow must be between")
 	expectErr(t, mutate(priceFeed, "disputeWindow", `1209601`), "disputeWindow must be between")
-	expectErr(t, mutate(priceFeed, "readPrice", `1999`), "readPrice is below the floor")
+	expectErr(t, mutate(priceFeed, "subscriberPrice", `1999`), "subscriberPrice is below the floor")
 	expectErr(t, mutate(priceFeed, "subscriptionPrice", `1`), "subscriptionPrice is below the floor")
 	expectErr(t, mutate(priceFeed, "sources", `"   "`), "sources is required")
 	expectErr(t, mutate(priceFeed, "sources", `"`+strings.Repeat("s", 2001)+`"`), "longer than 2000")
@@ -163,14 +163,14 @@ func TestValidationRules(t *testing.T) {
 	expectErr(t, mutate(mutate(priceFeed, "valueType", `"categorical"`), "decimals", `0`), "categorical feeds need 2 to 16 options")
 	expectErr(t, strings.Replace(priceFeed, `"tags"`, `"resolveAt": 1700100000, "tags"`, 1), "one-off fields")
 
-	// sponsored feeds have no read price
-	sponsored := mutate(priceFeed, "readPrice", `0`)
-	expectErr(t, sponsored, "readPrice is below the floor")
+	// sponsored feeds have no subscriber price
+	sponsored := mutate(priceFeed, "subscriberPrice", `0`)
+	expectErr(t, sponsored, "subscriberPrice is below the floor")
 	sponsored = strings.Replace(sponsored, `"tags"`, `"sponsored": true, "tags"`, 1)
 	s, err := spec.Parse(sponsored, now, limits())
 	uassert.NoError(t, err)
 	uassert.True(t, s.Sponsored)
-	expectErr(t, strings.Replace(priceFeed, `"tags"`, `"sponsored": true, "tags"`, 1), "sponsored feed has no readPrice")
+	expectErr(t, strings.Replace(priceFeed, `"tags"`, `"sponsored": true, "tags"`, 1), "sponsored feed has no subscriberPrice")
 	expectErr(t, strings.Replace(priceFeed, `"tags"`, `"sponsored": "yes", "tags"`, 1), "sponsored must be a boolean")
 
 	// numeric feeds may not carry options
@@ -197,30 +197,30 @@ func TestOneOffRules(t *testing.T) {
 
 func TestAmountBoundsDuplicatesAndWindows(t *testing.T) {
 	now := int64(1_700_000_000)
-	lim := spec.Limits{ProviderMinStakeFloor: 1_000_000_000, ReadPriceFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000}
-	base := `{"name":"X","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"sources":"s","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"disputeWindow":7200,"readPrice":%s,"subscriptionPrice":100000000}`
+	lim := spec.Limits{ProviderMinStakeFloor: 1_000_000_000, SubscriberFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000}
+	base := `{"name":"X","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"sources":"s","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"disputeWindow":7200,"subscriberPrice":%s,"subscriptionPrice":100000000}`
 	_, err := spec.Parse(strings.Replace(base, "%s", "1844674407370957", 1), now, lim)
-	if err == nil || !strings.Contains(err.Error(), "readPrice must be between") {
-		t.Fatalf("huge readPrice accepted: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "subscriberPrice must be between") {
+		t.Fatalf("huge subscriberPrice accepted: %v", err)
 	}
 	_, err = spec.Parse(strings.Replace(base, "%s", "2000", 1), now, lim)
 	if err != nil {
 		t.Fatalf("valid spec rejected: %v", err)
 	}
 	// a duplicated top-level key is rejected even when a nested string repeats it
-	dup := `{"name":"X","sources":"the \"name\" field","name":"Y","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"disputeWindow":7200,"readPrice":2000,"subscriptionPrice":100000000,"tags":["name","name"]}`
+	dup := `{"name":"X","sources":"the \"name\" field","name":"Y","kind":"recurring","valueType":"numeric","decimals":6,"interval":3600,"submitWindow":600,"minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"disputeWindow":7200,"subscriberPrice":2000,"subscriptionPrice":100000000,"tags":["name","name"]}`
 	_, err = spec.Parse(dup, now, lim)
 	if err == nil || !strings.Contains(err.Error(), `"name" appears twice`) {
 		t.Fatalf("duplicate key accepted: %v", err)
 	}
 	// one-off windows are bounded
-	oneOff := `{"name":"O","kind":"oneoff","valueType":"categorical","options":["A","B"],"resolveAt":` + strconv.FormatInt(now+7200, 10) + `,"submitWindow":9223372036854775807,"bounty":50000000,"sources":"s","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"disputeWindow":7200,"readPrice":2000}`
+	oneOff := `{"name":"O","kind":"oneoff","valueType":"categorical","options":["A","B"],"resolveAt":` + strconv.FormatInt(now+7200, 10) + `,"submitWindow":9223372036854775807,"bounty":50000000,"sources":"s","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"disputeWindow":7200}`
 	_, err = spec.Parse(oneOff, now, lim)
 	if err == nil || !strings.Contains(err.Error(), "submitWindow must be between 60 seconds and 30 days") {
 		t.Fatalf("huge one-off window accepted: %v", err)
 	}
 	// the realm may lower the dispute window ceiling
-	tight := spec.Limits{ProviderMinStakeFloor: 1_000_000_000, ReadPriceFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000, MaxDisputeWindow: 10800}
+	tight := spec.Limits{ProviderMinStakeFloor: 1_000_000_000, SubscriberFloor: 2000, SubscriptionFloor: 100_000_000, BountyFloor: 50_000_000, MaxDisputeWindow: 10800}
 	wide := strings.Replace(strings.Replace(base, "%s", "2000", 1), `"disputeWindow":7200`, `"disputeWindow":43200`, 1)
 	_, err = spec.Parse(wide, now, tight)
 	if err == nil || !strings.Contains(err.Error(), "disputeWindow must be between 2 hours and 3 hours") {

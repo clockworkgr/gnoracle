@@ -14,7 +14,7 @@ on gnodev the same realms live under `gno.land/r/clockwork/gnoracle/...`.
 
 | Component | Where | What it does |
 |---|---|---|
-| `core` (permanent realm) | chain | feeds, rounds, providers, credits, disputes; holds every GNOT balance; proxies to `core/impl/vN` |
+| `core` (permanent realm) | chain | feeds, rounds, providers, subscriptions, disputes; holds every GNOT balance; proxies to `core/impl/vN` |
 | `dao` (permanent realm) | chain | PYTH staking, proposals, dispute ballots, treasury; proxies to `dao/impl/vN`; `dao/exec` is its self-upgrade trampoline |
 | `token` | chain | PYTH (GRC20), minter is the DAO |
 | `kourt` (permanent realm) | chain | mirrors resolved disputes to the DAO's court on Kourt; `kourt/impl/kourtv3` binds the deployed Kourt v3 realm (`gno.land/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3`), `kourt/impl/v1` binds the stand-in `kourtdev` on development chains |

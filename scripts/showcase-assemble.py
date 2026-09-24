@@ -174,9 +174,9 @@ w("| price source | a local `python3 -m http.server` serving `price.json` on por
 w("\n### The feed\n")
 w("`gnoracle feed 1` before the run (the spec is what the DAO accepted when `make chain-test` created the feed):\n")
 w("| field | value |\n|---|---|\n")
-for k in ["name", "kind", "valueType", "decimals", "interval", "submitWindow", "sources", "minProviders", "maxProviders", "providerMinStake", "toleranceBps", "quarantineBps", "disputeWindow", "readPrice", "subscriptionPrice"]:
+for k in ["name", "kind", "valueType", "decimals", "interval", "submitWindow", "sources", "minProviders", "maxProviders", "providerMinStake", "toleranceBps", "quarantineBps", "disputeWindow", "subscriberPrice", "subscriptionPrice"]:
     v = spec.get(k)
-    if k in ("providerMinStake", "readPrice", "subscriptionPrice") and isinstance(v, int):
+    if k in ("providerMinStake", "subscriberPrice", "subscriptionPrice") and isinstance(v, int):
         v = f"{v} ugnot ({gnot(v)})"
     w(f"| `{k}` | {v} |\n")
 w(f"| status / pool / drip per round | {feed_b.get('status')} / {feed_b.get('pool')} ugnot / {feed_b.get('drip')} ugnot |\n")
@@ -196,7 +196,7 @@ if chain_test:
     w("\n## 1a. The chain was new\n")
     w(f"gnodev was started from scratch shortly before {ct_started[11:19]} UTC (`make dev RPC=36657 WEB=38888`) and "
       "`make chain-test` then drove the whole lifecycle once: accept the implementations, create and activate "
-      "feed 1, register two providers, submit two rounds, deposit consumer credit and read, stake in the DAO, "
+      "feed 1, register two providers, submit two rounds, subscribe a reader realm, stake in the DAO, "
       "forward fees, found the Kourt court and file a claim. Its step headings, unedited:\n")
     steps = [l[3:] for l in strip_ansi(chain_test).splitlines() if l.startswith("== ")]
     w(fence("\n".join(steps)))
@@ -283,13 +283,12 @@ w("`gnoracle rounds 1 10` (newest first) shows the rounds the run produced. `ope
 w("| round | status | tier | submitters (slots) | value | pool (ugnot) | opened → finalised |\n|---|---|---|---|---|---|---|\n")
 for r in sorted(sched_rounds, key=lambda r: -r["id"]):
     subs = ", ".join(str(s["slot"]) for s in r.get("submitted", []))
-    val = "delayed" if r.get("delayed") else (str(r.get("value")) if r.get("value") is not None else "")
+    val = str(r.get("value")) if r.get("value") is not None else ""
     fin = r["finalisedAt"] - r["opensAt"] if r.get("finalisedAt") else ""
     w(f"| {r['id']} | {r['status']} | {r['tier']} | {subs} | {val} | {r['pool']} | {fin}s |\n")
-w("\nValues read `delayed` because the free views only show a round's numbers once its dispute window and "
-  "`renderDelay` have passed (plan §6.1); a paying realm gets them immediately through `Read`. The bot's "
-  "`RoundFinalized` lines above carry the aggregate as emitted, which is the same rule applied to events: "
-  "the value is public in the event log, and the fresh *view* is what consumers pay for.\n")
+w("\nEvery value is public on the views the moment it exists; a realm uses a value inside its own logic through `Read`, served to subscribed realms (plan §6.1). The bot's "
+  "`RoundFinalized` lines above carry the aggregate as emitted: the same number the views show and a "
+  "subscribed realm's `Read` returns.\n")
 
 w("\n### Providers\n")
 w("| provider | key | status | slot | rewards before | rewards after | earned this run | consecutive misses |\n|---|---|---|---|---|---|---|---|\n")
@@ -299,7 +298,7 @@ for addr, p in sorted(prov_a.items(), key=lambda kv: kv[1]["slot"] if kv[1]["slo
 w(f"\nFeed pool: {feed_b.get('pool')} → {feed_a.get('pool')} ugnot (drip {feed_a.get('drip')} ugnot per round, from the "
   f"subscription bought by `make chain-test`); rounds finalised: {feed_b.get('roundsFinal')} → {feed_a.get('roundsFinal')}.\n")
 w("Each finalised round's pool is split equally among the eligible submitters after the 1% cranker tip. The pool "
-  "is the drip plus the provider share of read fees metered since the last finalisation plus any penalty carry: "
+  "is the drip plus any penalty carry: "
   "round 2 above carries the 14,000 ugnot provider share (70%) of the 20,000 ugnot `Read` that `make chain-test` "
   "paid, which is why it pays far more than the drip.\n")
 

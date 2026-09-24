@@ -62,7 +62,7 @@ type Core interface {
 	ActivateFeed(_ int, rlm realm, feedID uint64)
 	DeprecateFeed(_ int, rlm realm, feedID uint64, reason string)
 	UpdateFeed(_ int, rlm realm, feedID uint64, changesJSON string)
-	Sponsor(_ int, rlm realm, sponsor address, feedID uint64, periods int64, consumersCSV string, sent int64)
+	Sponsor(_ int, rlm realm, sponsor address, feedID uint64, periods int64, sent int64)
 	FundBounty(_ int, rlm realm, feedID uint64, sent int64)
 	Finalize(_ int, rlm realm, caller address, feedID, roundID uint64)
 	CatchUp(_ int, rlm realm, caller address, feedID uint64, maxRounds int64) int64
@@ -79,11 +79,12 @@ type Core interface {
 	ClaimRewards(_ int, rlm realm, provider address, feedID uint64) int64
 	ForceUnbond(_ int, rlm realm, feedID uint64, provider address)
 	// consumers
-	DepositFor(_ int, rlm realm, consumer address, sent int64)
-	WithdrawCredit(_ int, rlm realm, consumer address, amount int64)
-	SetFinalOnly(_ int, rlm realm, consumer address, on bool)
-	Read(_ int, rlm realm, consumer address, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string)
-	ReadRound(_ int, rlm realm, consumer address, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
+	DepositFor(_ int, rlm realm, account address, sent int64)
+	WithdrawCredit(_ int, rlm realm, account address, amount int64)
+	SubscribeRealm(_ int, rlm realm, payer address, payerPkg string, feedID uint64, pkgPath string, periods int64, sent int64)
+	Read(_ int, rlm realm, caller address, callerPkg string, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string)
+	ReadFinal(_ int, rlm realm, caller address, callerPkg string, feedID uint64) (value int64, decimals int64, roundID uint64, finalisedAt int64, tier string)
+	ReadRound(_ int, rlm realm, caller address, callerPkg string, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
 	// disputes (plan §7)
 	Dispute(_ int, rlm realm, disputer address, feedID, roundID uint64, proposedValue int64, tier, evidence string, sent int64) uint64
 	Appeal(_ int, rlm realm, appellant address, disputeID uint64, sent int64)
@@ -127,15 +128,14 @@ func UpdateFeed(cur realm, feedID uint64, changesJSON string) {
 	live().UpdateFeed(0, cur, feedID, changesJSON)
 }
 
-// Sponsor pays periods x subscriptionPrice into a feed's pool (-send) and
-// names up to 8 consumer realms whose metered reads of that feed are free
-// while the sponsorship lasts. Comma-separated addresses.
-func Sponsor(cur realm, feedID uint64, periods int64, consumersCSV string) {
+// Sponsor pays periods x subscriptionPrice into a feed's pool (-send) so the
+// feed stays funded; anyone may, several may for the same feed.
+func Sponsor(cur realm, feedID uint64, periods int64) {
 	prev := cur.Previous()
 	if !prev.IsUserCall() {
 		panic("core: Sponsor takes coins and must be called directly by an account")
 	}
-	live().Sponsor(0, cur, prev.Address(), feedID, periods, consumersCSV, unsafe.OriginSend().AmountOf(StakeDenom))
+	live().Sponsor(0, cur, prev.Address(), feedID, periods, unsafe.OriginSend().AmountOf(StakeDenom))
 }
 
 // FundBounty adds -send to a one-off feed's bounty.
@@ -229,39 +229,56 @@ func ForceUnbond(cur realm, feedID uint64, provider address) {
 
 // ------------------------------------------------------------ consumers ----
 
-// DepositFor credits -send to a consumer's metered-read balance. A realm
-// cannot attach coins to its own calls, so its operator funds it from an
-// account and names it here.
-func DepositFor(cur realm, consumer address) {
+// DepositFor adds -send to an account's prepaid balance on the core. A realm
+// cannot attach coins to its own calls, so a realm that requests feeds or
+// subscribes is funded this way by its operator; refunds owed to a realm land
+// in the same balance. Reads never touch it.
+func DepositFor(cur realm, account address) {
 	prev := cur.Previous()
 	if !prev.IsUserCall() {
 		panic("core: DepositFor takes coins and must be called directly by an account")
 	}
-	live().DepositFor(0, cur, consumer, unsafe.OriginSend().AmountOf(StakeDenom))
+	live().DepositFor(0, cur, account, unsafe.OriginSend().AmountOf(StakeDenom))
 }
 
-// WithdrawCredit returns unspent credit to the caller.
+// WithdrawCredit returns unspent prepaid balance to the caller.
 func WithdrawCredit(cur realm, amount int64) {
 	live().WithdrawCredit(0, cur, cur.Previous().Address(), amount)
 }
 
-// SetFinalOnly makes the caller's reads return the latest final round at half
-// price instead of the latest aggregate.
-func SetFinalOnly(cur realm, on bool) {
-	live().SetFinalOnly(0, cur, cur.Previous().Address(), on)
+// SubscribeRealm pays periods (1 to 12) of a feed's subscriberPrice for the
+// realm at pkgPath, which may then Read the feed until the paid time ends.
+// An account pays with -send for any realm; a realm caller pays from its
+// prepaid balance. Sponsored feeds and one-off outcomes need no
+// subscription, nor does a feed's own realm requester.
+func SubscribeRealm(cur realm, feedID uint64, pkgPath string, periods int64) {
+	prev := cur.Previous()
+	live().SubscribeRealm(0, cur, prev.Address(), prev.PkgPath(), feedID, pkgPath, periods, unsafe.OriginSend().AmountOf(StakeDenom))
 }
 
-// Read returns the latest served value of a feed and debits the caller's
-// credit unless a sponsor covers it. tier is consensus, provisional, final,
-// disputed, stale or none, with ",unfunded" appended while the feed's pool is
-// empty.
+// Read returns the latest served value of a feed to a subscribed realm. It
+// is a crossing call so the reader is known, changes no state and costs
+// nothing per call. tier is consensus, provisional, final, disputed, stale
+// or none, with ",unfunded" appended while the feed's pool is empty. People
+// and off-chain readers use the pages and the :json views, which show every
+// value: what a subscription buys is the right to use a value inside a
+// realm's own logic.
 func Read(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string) {
-	return live().Read(0, cur, cur.Previous().Address(), feedID)
+	prev := cur.Previous()
+	return live().Read(0, cur, prev.Address(), prev.PkgPath(), feedID)
 }
 
-// ReadRound returns one specific round.
+// ReadFinal returns the latest final round of a feed to a subscribed realm,
+// whatever the state of later rounds.
+func ReadFinal(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, finalisedAt int64, tier string) {
+	prev := cur.Previous()
+	return live().ReadFinal(0, cur, prev.Address(), prev.PkgPath(), feedID)
+}
+
+// ReadRound returns one specific round to a subscribed realm.
 func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64) {
-	return live().ReadRound(0, cur, cur.Previous().Address(), feedID, roundID)
+	prev := cur.Previous()
+	return live().ReadRound(0, cur, prev.Address(), prev.PkgPath(), feedID, roundID)
 }
 
 // ------------------------------------------------------------- disputes ----

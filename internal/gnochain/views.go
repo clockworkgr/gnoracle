@@ -37,7 +37,7 @@ type FeedSpec struct {
 	ToleranceBps      int64    `json:"toleranceBps"`
 	QuarantineBps     int64    `json:"quarantineBps"`
 	DisputeWindow     int64    `json:"disputeWindow"`
-	ReadPrice         int64    `json:"readPrice"`
+	SubscriberPrice   int64    `json:"subscriberPrice"`
 	SubscriptionPrice int64    `json:"subscriptionPrice"`
 	Sponsored         bool     `json:"sponsored"`
 	ValueAtStake      int64    `json:"valueAtStake"`
@@ -71,8 +71,7 @@ type FeedInfo struct {
 	LastRoundAt    int64    `json:"lastRoundAt"`
 	LastFinalAt    int64    `json:"lastFinalAt"`
 	LastTier       string   `json:"lastTier"`
-	Value          *int64   `json:"value"` // nil while delayed
-	Delayed        bool     `json:"delayed"`
+	Value          *int64   `json:"value"` // nil before the first value
 	ServedTier     string   `json:"servedTier"`
 	CurrentRound   *uint64  `json:"currentRound"`
 	CurrentOpenAt  int64    `json:"currentOpenAt"`
@@ -156,9 +155,8 @@ type RoundInfo struct {
 	Overturned    bool              `json:"overturned"`
 	SubmittedMask int64             `json:"submittedMask"`
 	Submitted     []RoundSubmission `json:"submitted"`
-	Value         *int64            `json:"value"`
+	Value         *int64            `json:"value"` // nil while the round is open
 	Values        []RoundSubmission `json:"values"`
-	Delayed       bool              `json:"delayed"`
 	Started       *bool             `json:"started"` // round/current before StartAt
 }
 
@@ -349,6 +347,29 @@ type ProposalInfo struct {
 	No         int64  `json:"no"`
 	Abstain    int64  `json:"abstain"`
 	Voters     int64  `json:"voters"`
+}
+
+// SubscriptionInfo is json/feed/<id>/subscription/<realm>, and an element of
+// json/feed/<id>/subscribers.
+type SubscriptionInfo struct {
+	Now       int64  `json:"now"`
+	Feed      uint64 `json:"feed"`
+	Realm     string `json:"realm"`
+	Exists    bool   `json:"exists"`
+	Since     int64  `json:"since"`
+	PaidUntil int64  `json:"paidUntil"`
+	Paid      int64  `json:"paid"`
+	Periods   int64  `json:"periods"`
+	Active    bool   `json:"active"`
+}
+
+// SubscribersInfo is json/feed/<id>/subscribers.
+type SubscribersInfo struct {
+	Now             int64              `json:"now"`
+	Feed            uint64             `json:"feed"`
+	SubscriberPrice int64              `json:"subscriberPrice"`
+	Sponsored       bool               `json:"sponsored"`
+	Subscribers     []SubscriptionInfo `json:"subscribers"`
 }
 
 // KourtRecord is the mirror's json/record/<dispute>.
@@ -557,6 +578,18 @@ func (c *Client) RevealOf(dao string, seq uint64, addr string) (*VoteStatus, err
 func (c *Client) Proposal(dao string, id uint64) (*ProposalInfo, error) {
 	var p ProposalInfo
 	return &p, c.JSONView(dao, "proposal/"+u(id), &p)
+}
+
+// ---- subscription readers
+
+func (c *Client) Subscribers(core string, feed uint64) (*SubscribersInfo, error) {
+	var s SubscribersInfo
+	return &s, c.JSONView(core, "feed/"+u(feed)+"/subscribers", &s)
+}
+
+func (c *Client) Subscription(core string, feed uint64, realmPath string) (*SubscriptionInfo, error) {
+	var s SubscriptionInfo
+	return &s, c.JSONView(core, "feed/"+u(feed)+"/subscription/"+realmPath, &s)
 }
 
 // ---- kourt readers

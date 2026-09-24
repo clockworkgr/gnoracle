@@ -33,8 +33,8 @@ func defineParams() {
 	// feeds
 	def("feedDeposit", "deposit attached to a feed proposal, refunded unless spam", 5*gnot, 1*gnot, 1000*gnot, 5000)
 	def("providerMinStakeFloor", "smallest providerMinStake a spec may set", 10_000*gnot, 1_000*gnot, 1_000_000*gnot, 5000)
-	def("readPriceFloor", "smallest readPrice a non-sponsored spec may set", 2000, 0, 1*gnot, 5000)
 	def("subscriptionFloor", "smallest subscriptionPrice per period", 100*gnot, 10*gnot, 100_000*gnot, 5000)
+	def("subscriberFloor", "smallest subscriberPrice per period a non-sponsored recurring spec may set", 2000, 0, 100_000*gnot, 5000)
 	def("bountyFloor", "smallest one-off bounty", 50*gnot, 1*gnot, 100_000*gnot, 5000)
 	def("subscriptionPeriod", "length of one subscription period", 30*24*3600, 7*24*3600, 90*24*3600, 5000)
 	def("maxCatchUpRounds", "stale rounds written off per CatchUp call", 48, 1, 500, 5000)
@@ -42,7 +42,6 @@ func defineParams() {
 	def("minRoundsKept", "rounds always kept per feed regardless of age", 64, 8, 10_000, 5000)
 	def("retentionAfterDeprecate", "seconds after deprecation before a feed may be pruned", 90*24*3600, 30*24*3600, 730*24*3600, 5000)
 	def("deadFeedRounds", "consecutive empty rounds after which a feed is deprecated on prune", 168, 24, 10_000, 5000)
-	def("renderDelay", "seconds a final value must age before free views show it", 600, 0, 24*3600, 5000)
 	def("maxIncentivePay", "largest fee-pool payment a release may make per call (tips, bounties)", 10*gnot, 0, 1000*gnot, 5000)
 	def("trustedOneOffCap", "largest declared value at stake a trusted requester may self-activate", 50_000*gnot, 0, 10_000_000*gnot, 5000)
 	// providers
@@ -61,9 +60,8 @@ func defineParams() {
 	def("unbondPeriod", "seconds between RequestUnbond and Withdraw", 14*24*3600, 7*24*3600, 60*24*3600, 5000)
 	def("crankTipBps", "share of a round pool paid to whoever finalises it", 100, 0, 1000, 5000)
 	// fees
-	def("feeSplitProvidersBps", "share of subscriptions and read fees to the feed pool", 7000, 0, 10_000, 5000)
-	def("feeSplitStakersBps", "share of subscriptions and read fees to DAO stakers", 1500, 0, 5000, 5000)
-	def("readPriceFinalBps", "price of a final-only read as a share of readPrice", 5000, 0, 10_000, 5000)
+	def("feeSplitProvidersBps", "share of subscription payments (feed funding and realm subscriptions) to the feed pool", 7000, 0, 10_000, 5000)
+	def("feeSplitStakersBps", "share of subscription payments to DAO stakers", 1500, 0, 5000, 5000)
 	// disputes
 	def("minDisputeBond", "smallest dispute bond", 2500*gnot, 100*gnot, 100_000*gnot, 5000)
 	def("disputeBondBps", "dispute bond as a share of the feed's active stake", 1000, 100, 10_000, 5000)

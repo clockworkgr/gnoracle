@@ -41,7 +41,7 @@ func ensureStake(cur realm, who address, target int64) {
 // newFeed proposes and activates a 10-minute numeric feed with three
 // providers and returns its id.
 func newFeed(cur realm, tag string) uint64 {
-	spec := `{"name":"` + tag + `","kind":"recurring","valueType":"numeric","decimals":6,"interval":600,"submitWindow":300,"sources":"three exchanges","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":2000,"disputeWindow":43200,"readPrice":20000,"subscriptionPrice":100000000}`
+	spec := `{"name":"` + tag + `","kind":"recurring","valueType":"numeric","decimals":6,"interval":600,"submitWindow":300,"sources":"three exchanges","minProviders":2,"maxProviders":5,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":2000,"disputeWindow":43200,"subscriberPrice":20000,"subscriptionPrice":100000000}`
 	testing.SetRealm(testing.NewUserRealm(sponsorA))
 	payCore(105 * gnot)
 	id := core.ProposeFeed(cross(cur), spec)
@@ -102,8 +102,7 @@ func TestDisputeUpheldPaysProvidersAndVoters(cur realm, t *testing.T) {
 	epoch()
 	id := newFeed(cur, "UPHOLD/USD")
 	round := runRound(cur, id, 1_000_000, 1_001_000, 1_002_000)
-	rd := core.GetRound(id, round)
-	uassert.Equal(t, int64(1_001_000), rd.Value)
+	uassert.Equal(t, int64(1_001_000), roundValue(cur, id, round))
 
 	// a watcher disputes with the minimum bond (2500 GNOT); the round is quarantined
 	testing.SetRealm(testing.NewUserRealm(watcher))
@@ -127,9 +126,12 @@ func TestDisputeUpheldPaysProvidersAndVoters(cur realm, t *testing.T) {
 	nosend()
 	dao.RequestUnstake(cross(cur), 1*pyth)
 	uassert.Equal(t, int64(1_000_000*pyth), dao.GetMember(alice).Staked)
-	// the disputed value is not served: a reader gets no value under the
-	// disputed tier and pays nothing (there is no earlier final round yet)
-	testing.SetRealm(testing.NewUserRealm(stranger))
+	// the disputed value is not served: a subscribed realm gets no value
+	// under the disputed tier (there is no earlier final round yet)
+	testing.SetRealm(testing.NewUserRealm(watcher))
+	payCore(1 * gnot)
+	core.SubscribeRealm(cross(cur), id, readerPath, 1)
+	testing.SetRealm(testing.NewCodeRealm(readerPath))
 	nosend()
 	dv, _, _, _, dtier := core.Read(cross(cur), id)
 	uassert.Equal(t, int64(0), dv)
@@ -212,7 +214,7 @@ func TestDisputeOverturnSlashesAndEjects(cur realm, t *testing.T) {
 	id := newFeed(cur, "OVERTURN/USD")
 	// dave and erin collude at 1.0; frank reports the true 1.5 and is the outlier
 	round := runRound(cur, id, 1_000_000, 1_001_000, 1_500_000)
-	uassert.Equal(t, int64(1_001_000), core.GetRound(id, round).Value)
+	uassert.Equal(t, int64(1_001_000), roundValue(cur, id, round))
 	uassert.Equal(t, int64(1), core.GetProvider(id, frank).Strikes)
 
 	testing.SetRealm(testing.NewUserRealm(watcher))
@@ -241,10 +243,10 @@ func TestDisputeOverturnSlashesAndEjects(cur realm, t *testing.T) {
 	uassert.Equal(t, int64(1), core.GetFeed(id).ActiveCount)
 	// the round now carries the corrected value, final
 	rd := core.GetRound(id, round)
-	uassert.Equal(t, int64(1_500_000), rd.Value)
+	uassert.Equal(t, int64(1_500_000), roundValue(cur, id, round))
 	uassert.Equal(t, "final", rd.Tier)
 	uassert.True(t, rd.Overturned)
-	uassert.Equal(t, int64(1_500_000), core.GetFeed(id).LastValue)
+	uassert.Equal(t, int64(1_500_000), feedValue(cur, id))
 	// the disputer got the bond back plus 50% of the slash (1000 GNOT)
 	uassert.Equal(t, watcherBefore-2_500*gnot-1_000*gnot-600*gnot, core.Balance()) // 600 = 30% voters sent to the DAO
 	uassert.Equal(t, int64(600*gnot), dao.GetBallot(dao.BallotOf(did)).BondShareUgnot)
@@ -259,7 +261,7 @@ func TestDisputeRollsThenVoidsAndReopens(cur realm, t *testing.T) {
 	epoch()
 	// a one-off categorical feed so the void path can be reopened
 	resolveAt := core.Now() + 2*3600
-	spec := `{"name":"Match result","kind":"oneoff","valueType":"categorical","options":["Home","Away","Draw"],"resolveAt":` + strconv.FormatInt(resolveAt, 10) + `,"submitWindow":600,"bounty":50000000,"sources":"the league site","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"disputeWindow":43200,"readPrice":2000}`
+	spec := `{"name":"Match result","kind":"oneoff","valueType":"categorical","options":["Home","Away","Draw"],"resolveAt":` + strconv.FormatInt(resolveAt, 10) + `,"submitWindow":600,"bounty":50000000,"sources":"the league site","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"disputeWindow":43200}`
 	testing.SetRealm(testing.NewUserRealm(sponsorA))
 	payCore(55 * gnot)
 	id := core.ProposeFeed(cross(cur), spec)
@@ -383,7 +385,7 @@ func TestAppealReversesRoundOne(cur realm, t *testing.T) {
 	uassert.Equal(t, int64(150*gnot), d.Slashed)
 	uassert.Equal(t, int64(950*gnot), core.GetProvider(id, dave).Stake)
 	uassert.Equal(t, core.ProviderActive, core.GetProvider(id, dave).Status)
-	uassert.Equal(t, int64(2_100_000), core.GetRound(id, round).Value)
+	uassert.Equal(t, int64(2_100_000), roundValue(cur, id, round))
 	_, _, _, _, _, bonds, _, _ := core.Held()
 	uassert.Equal(t, int64(0), bonds) // both bonds returned, slash routed
 	health(t)
@@ -425,4 +427,27 @@ func TestJSONBallots(cur realm, t *testing.T) {
 		}
 	}
 	uassert.True(t, committedVoters >= 1)
+}
+
+// readerPath is the consumer realm the stories subscribe when they read.
+const readerPath = "gno.land/r/demo/reader"
+
+// roundValue and feedValue read values off the public machine views, which
+// show everything (a realm's Read is gated, the pages are not).
+func roundValue(cur realm, feed, round uint64) int64 {
+	node, err := json.Unmarshal([]byte(core.Render(cross(cur), "json/feed/"+strconv.FormatUint(feed, 10)+"/round/"+strconv.FormatUint(round, 10))))
+	if err != nil {
+		panic(err)
+	}
+	v, _ := node.MustKey("value").GetNumeric()
+	return int64(v)
+}
+
+func feedValue(cur realm, feed uint64) int64 {
+	node, err := json.Unmarshal([]byte(core.Render(cross(cur), "json/feed/"+strconv.FormatUint(feed, 10))))
+	if err != nil {
+		panic(err)
+	}
+	v, _ := node.MustKey("value").GetNumeric()
+	return int64(v)
 }

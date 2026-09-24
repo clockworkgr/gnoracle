@@ -241,7 +241,6 @@ dev_clocks() {
   lower_param core appealWindow 30       # 24 h
   lower_param dao epochBlocks 10         # 720 blocks: voting weight activates at the next epoch
   lower_param core providerMinStakeFloor 1000000000   # 10,000 GNOT
-  lower_param core renderDelay 0                      # 600 s before free pages show a final value
 }
 
 keys_and_funding() {
@@ -273,9 +272,9 @@ members() {
 }
 
 create_feed() {
-  step "feed: propose and activate DEMO/USD (one-minute rounds), register three providers, fund the reader's credit"
+  step "feed: propose and activate DEMO/USD (one-minute rounds), register three providers, subscribe the reader realm"
   local spec p
-  spec='{"name":"DEMO/USD","description":"the demo feed: three agents, one reader realm","kind":"recurring","valueType":"numeric","decimals":6,"interval":60,"submitWindow":60,"sources":"Any number; this is a demo.","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":1000,"disputeWindow":7200,"readPrice":20000,"subscriptionPrice":100000000}'
+  spec='{"name":"DEMO/USD","description":"the demo feed: three agents, one reader realm","kind":"recurring","valueType":"numeric","decimals":6,"interval":60,"submitWindow":60,"sources":"Any number; this is a demo.","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":1000,"disputeWindow":7200,"subscriberPrice":10000000,"subscriptionPrice":100000000}'
   KEY=test1 sendcallq "$CORE" ProposeFeed 105000000ugnot "$spec" || fail "ProposeFeed"
   FEED="$(qeval "$CORE.FeedCount()" | num)"
   KEY=test1 callq "$CORE" ActivateFeed "$FEED" || fail "ActivateFeed"
@@ -283,13 +282,14 @@ create_feed() {
     KEY="$p" sendcallq "$CORE" Register 1000000000ugnot "$FEED" "demo agent $p" || fail "$p could not register"
   done
   READER_ADDR="$(qeval "$READER.Address()" | grep -oE 'g1[0-9a-z]{38}' | head -1)"
-  KEY=test1 sendcallq "$CORE" DepositFor 10000000ugnot "$READER_ADDR" || fail "DepositFor the reader"
+  # a read costs nothing per call; the core serves it to subscribed realms, 10 GNOT per 30-day period on this feed
+  KEY=test1 sendcallq "$CORE" SubscribeRealm 10000000ugnot "$FEED" "$READER" 1 || fail "SubscribeRealm for the reader"
   START="$(qeval "$CORE.GetFeed($FEED).StartAt" | num)"
-  say "feed $FEED active, first round at chain time $START; reader realm $READER_ADDR holds 10 GNOT of read credit"
+  say "feed $FEED active, first round at chain time $START; reader realm $READER subscribed for one period (10 GNOT)"
   link "feed page" "$WEBURL/r/clockwork/gnoracle/core:feed/$FEED"
   link "its rounds" "$WEBURL/r/clockwork/gnoracle/core:feed/$FEED/rounds"
   link "reader realm" "$WEBURL/r/clockwork/gnoracle/demo/reader"
-  link "reader's credit" "$WEBURL/r/clockwork/gnoracle/core:consumer/$READER_ADDR"
+  link "feed subscribers" "$WEBURL/r/clockwork/gnoracle/core:feed/$FEED/subscribers"
 }
 
 write_configs() {
@@ -362,7 +362,7 @@ results() {
   "${CLI[@]}" -raw rounds "$FEED" 6 > "$OUT/rounds.json"
   jq_ '[print("   round", r["id"], r["status"], r["tier"], "submitters", len(r["submitted"]), "pool", r["pool"]) for r in d["rounds"]]' < "$OUT/rounds.json"
   qrender "$READER" json > "$OUT/readings.json"
-  jq_ 'print("   reader:", d["count"], "readings, credit left", d["credit"], "ugnot"); [print("    #%s height %s round %s value %s (%s)" % (r["seq"], r["height"], r["round"], r["value"], r["tier"])) for r in d["readings"][:5]]' < "$OUT/readings.json"
+  jq_ 'print("   reader:", d["count"], "readings, subscribed until chain time", d["subscribedUntil"]); [print("    #%s height %s round %s value %s (%s)" % (r["seq"], r["height"], r["round"], r["value"], r["tier"])) for r in d["readings"][:5]]' < "$OUT/readings.json"
   local ok=1
   if ! jq_ 'import sys; rs=[r for r in d["rounds"] if r["status"]!="open"][:3]; sys.exit(0 if len(rs)==3 and all(r["status"]=="aggregated" and len(r["submitted"])>=2 for r in rs) else 1)' < "$OUT/rounds.json"; then
     echo "   x the last three finalised rounds are not all aggregated with two or more submitters"; ok=0
@@ -469,15 +469,13 @@ mirror_to_kourt() {
 
 links() {
   step "inspect on gnoweb $WEBURL (everything is still running; make demo-stop ends what the demo started)"
-  local ch="$(addr_of "$CHALLENGER")"
   cat <<LINKS | tee "$OUT/links.txt"
    gnoweb home         $WEBURL/r/clockwork/gnoracle/core
    feed and rounds     $WEBURL/r/clockwork/gnoracle/core:feed/$FEED      $WEBURL/r/clockwork/gnoracle/core:feed/$FEED/rounds
    providers           $WEBURL/r/clockwork/gnoracle/core:provider/$FEED/$(addr_of demo1)
-   the reader realm    $WEBURL/r/clockwork/gnoracle/demo/reader      (its credit: $WEBURL/r/clockwork/gnoracle/core:consumer/$READER_ADDR)
+   the reader realm    $WEBURL/r/clockwork/gnoracle/demo/reader      (subscribers: $WEBURL/r/clockwork/gnoracle/core:feed/$FEED/subscribers)
    the dispute         $WEBURL/r/clockwork/gnoracle/core:dispute/$DID      (all: $WEBURL/r/clockwork/gnoracle/core:disputes)
    the DAO             $WEBURL/r/clockwork/gnoracle/dao:members      $WEBURL/r/clockwork/gnoracle/dao:member/$(addr_of voter1)
-   the challenger      $WEBURL/r/clockwork/gnoracle/core:consumer/$ch      (the bond above 2,500 GNOT became read credit)
    Kourt mirror        $WEBURL/r/clockwork/gnoracle/kourt:dispute/$DID
    the court on Kourt  $WEBURL/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3:gnoracle      claim: $WEBURL/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3:gnoracle/${CLAIM:-1}
    health              $WEBURL/r/clockwork/gnoracle/core:health      $WEBURL/r/clockwork/gnoracle/dao:health

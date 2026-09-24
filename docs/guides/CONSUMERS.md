@@ -1,8 +1,11 @@
 # Consuming a feed from a realm
 
-A realm reads a feed with one crossing call and pays per read from a credit
-balance, or reads free when a sponsor covers it. Off-chain readers use the
-public JSON views, which show values once they are final and ten minutes old.
+A realm reads a feed with one crossing call. The call changes nothing and
+costs nothing per read; what the core checks is that the calling realm is
+allowed to use the feed on chain: it holds a subscription that covers now,
+or the feed is sponsored, or it is a one-off outcome (public once final), or
+the realm is the feed's own requester. Off-chain readers use the public
+pages and JSON views, which show every value the moment it exists.
 
 ## From a realm
 
@@ -20,12 +23,17 @@ func Settle(cur realm) {
 }
 ```
 
-- `Read(cur, feedID)` returns the latest round's value and tier and debits
-  the calling realm's credit by the feed's `readPrice` (half price with
-  `finalOnly`, free when sponsored).
+- `Read(cur, feedID)` returns the latest round's value and tier.
+- `ReadFinal(cur, feedID)` returns the last final round, whatever later
+  rounds are doing (the conservative choice for anything that moves money).
 - `ReadRound(cur, feedID, roundID)` returns a specific round.
 - For option feeds (`valueType = "categorical"`) the value is the option
   index; the labels are in the spec.
+
+Read at the moment you need the number, inside the transaction that uses
+it: that value is never stale. A realm that polls on a schedule and caches
+is as fresh as its last poll (the demo's reader realm does that to show a
+history).
 
 What the tiers mean (plan §4.3): `consensus` is a round where at least
 `minProviders` agreed within tolerance and the value stayed within the
@@ -38,40 +46,42 @@ exists yet); a voided latest round also falls back to the last final one;
 
 Keep the value a single `provisional` read controls below the feed's value
 at risk (half the active stake times the major-slash share, divided per
-provider). For anything larger wait for `final`.
+provider). For anything larger use `ReadFinal`.
 
-## Paying
+## Subscribing
 
-Reads are charged to the **calling realm's address**. A realm cannot attach
-coins to its own calls, so anyone funds it from an account:
+A subscription names the reading realm by its package path and is paid per
+30-day period, 1 to 12 at a time, by anyone:
 
 ```sh
-gnoracle deposit 100gnot <realm address>          # DepositFor: credits the realm
-gnoracle -raw call <core> WithdrawCredit 50000000 # returns unused credit to the caller's own account
+gnoracle feed 1                                      # spec.subscriberPrice per period, subscribers
+gnoracle subscribe 1 gno.land/r/you/app 3 30gnot     # SubscribeRealm: 3 periods x subscriberPrice
+gnoracle subscription 1 gno.land/r/you/app           # paidUntil, active
+gnoracle subscribers 1
 ```
 
-`SetFinalOnly(true)` halves the price and serves the last final round (tier
-`final`), whatever the latest round's state; the consumer sets it on its own
-credit record, so a realm consumer exposes a small owner-only function that
-calls `core.SetFinalOnly(cross(cur), true)`. Nothing is charged when nothing
-is served.
+Paying again extends the same subscription from its current end. The price
+is per feed (`spec.subscriberPrice`, above the DAO's `subscriberFloor`);
+70% of it joins the feed's pool for the providers, 15% goes to DAO stakers
+and 15% to the treasury. Sponsored feeds (`spec.sponsored`) and one-off
+outcomes take no subscription: every realm may read them.
 
-Metered prices are per feed (`spec.readPrice`, floor 0.002 GNOT). A realm
-that reads often is cheaper on a subscription: see
-[SPONSORS.md](SPONSORS.md). A sponsor names up to eight consumer addresses
-whose reads on that feed are free for the sponsored period.
+A realm can also pay for itself from a prepaid balance its operator funds
+with `gnoracle deposit <amount> <realm address>`; the same balance pays a
+realm's feed requests and bounties, and receives its refunds. Reads never
+touch it.
 
 ## Off chain
 
 ```sh
-gnoracle feed 1          # spec, status, schedule; value once delayed
+gnoracle feed 1          # spec, status, schedule, the latest value
 gnoracle round 1 current
 gnoracle rounds 1 20
 ```
 
-or `vm/qrender` on `<core>:json/feed/1`. Values appear once the round is
-final and `renderDelay` (10 minutes) old; before that the object says
-`"delayed": true`. Fresh values are for paying realms.
+or `vm/qrender` on `<core>:json/feed/1`. Everything the chain holds is
+public and shows at once; a subscription buys a realm the right to use a
+value in its own logic, not secrecy.
 
 ## Trusting a feed
 

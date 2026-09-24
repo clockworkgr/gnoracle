@@ -61,7 +61,7 @@ const (
 // parameter registry and are handed in at parse time.
 type Limits struct {
 	ProviderMinStakeFloor int64 // base units of the stake denom
-	ReadPriceFloor        int64 // per metered read
+	SubscriberFloor       int64 // per period, what a realm pays to read a recurring feed
 	SubscriptionFloor     int64 // per period, recurring feeds
 	BountyFloor           int64 // one-off feeds
 	MaxDisputeWindow      int64 // 0: the package default; the realm lowers it so unbonding outlasts a dispute
@@ -89,7 +89,7 @@ type Spec struct {
 	ToleranceBps      int64
 	QuarantineBps     int64
 	DisputeWindow     int64
-	ReadPrice         int64
+	SubscriberPrice   int64 // per period, per subscribed realm (recurring, not sponsored)
 	SubscriptionPrice int64
 	Sponsored         bool
 	ValueAtStake      int64 // optional: what the requester says the outcome controls (trusted-requester cap)
@@ -174,7 +174,7 @@ func Parse(text string, now int64, lim Limits) (*Spec, error) {
 	s.ToleranceBps = p.int("toleranceBps", false, 100)
 	s.QuarantineBps = p.int("quarantineBps", false, 1000)
 	s.DisputeWindow = p.int("disputeWindow", true, 0)
-	s.ReadPrice = p.int("readPrice", false, 0)
+	s.SubscriberPrice = p.int("subscriberPrice", false, 0)
 	s.SubscriptionPrice = p.int("subscriptionPrice", false, 0)
 	s.Sponsored = p.boolean("sponsored")
 	s.ValueAtStake = p.int("valueAtStake", false, 0)
@@ -192,7 +192,7 @@ var knownKeys = map[string]bool{
 	"name": true, "description": true, "kind": true, "valueType": true, "decimals": true,
 	"options": true, "interval": true, "submitWindow": true, "resolveAt": true, "bounty": true,
 	"sources": true, "minProviders": true, "maxProviders": true, "providerMinStake": true,
-	"toleranceBps": true, "quarantineBps": true, "disputeWindow": true, "readPrice": true,
+	"toleranceBps": true, "quarantineBps": true, "disputeWindow": true, "subscriberPrice": true,
 	"subscriptionPrice": true, "sponsored": true, "valueAtStake": true, "tags": true,
 }
 
@@ -203,7 +203,7 @@ func (s *Spec) validate(now int64, lim Limits) error {
 	for _, a := range []struct {
 		name string
 		v    int64
-	}{{"readPrice", s.ReadPrice}, {"subscriptionPrice", s.SubscriptionPrice}, {"bounty", s.Bounty}, {"providerMinStake", s.ProviderMinStake}, {"valueAtStake", s.ValueAtStake}} {
+	}{{"subscriberPrice", s.SubscriberPrice}, {"subscriptionPrice", s.SubscriptionPrice}, {"bounty", s.Bounty}, {"providerMinStake", s.ProviderMinStake}, {"valueAtStake", s.ValueAtStake}} {
 		if a.v < 0 || a.v > MaxAmount {
 			return errors.New("spec: " + a.name + " must be between 0 and 1000000000000000 ugnot")
 		}
@@ -229,9 +229,16 @@ func (s *Spec) validate(now int64, lim Limits) error {
 		if s.SubscriptionPrice < lim.SubscriptionFloor {
 			return errors.New("spec: subscriptionPrice is below the floor")
 		}
+		if s.Sponsored {
+			if s.SubscriberPrice != 0 {
+				return errors.New("spec: a sponsored feed has no subscriberPrice")
+			}
+		} else if s.SubscriberPrice < lim.SubscriberFloor {
+			return errors.New("spec: subscriberPrice is below the floor")
+		}
 	case KindOneOff:
-		if s.Interval != 0 || s.SubscriptionPrice != 0 {
-			return errors.New("spec: interval and subscriptionPrice are recurring fields")
+		if s.Interval != 0 || s.SubscriptionPrice != 0 || s.SubscriberPrice != 0 {
+			return errors.New("spec: interval, subscriptionPrice and subscriberPrice are recurring fields")
 		}
 		if s.SubmitWindow < MinSubmitWindow || s.SubmitWindow > MaxSubmitWindowOneOff {
 			return errors.New("spec: submitWindow must be between 60 seconds and 30 days")
@@ -290,13 +297,6 @@ func (s *Spec) validate(now int64, lim Limits) error {
 	}
 	if s.DisputeWindow < MinDisputeWindow || s.DisputeWindow > maxDispute {
 		return errors.New("spec: disputeWindow must be between 2 hours and " + strconv.FormatInt(maxDispute/3600, 10) + " hours")
-	}
-	if s.Sponsored {
-		if s.ReadPrice != 0 {
-			return errors.New("spec: a sponsored feed has no readPrice")
-		}
-	} else if s.ReadPrice < lim.ReadPriceFloor {
-		return errors.New("spec: readPrice is below the floor")
 	}
 	if strings.TrimSpace(s.Sources) == "" {
 		return errors.New("spec: sources is required")

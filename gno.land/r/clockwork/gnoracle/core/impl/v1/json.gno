@@ -11,11 +11,11 @@ import (
 )
 
 // renderJSON serves the machine views under `:json/...` that the provider
-// agent, the bot and the CLI read through vm/qrender. Values follow the same
-// delay rule as the pages: a round's value appears once the dispute window
-// and renderDelay have passed (plan §6.1); before that the object says
-// "delayed": true. Every object carries "now" (block time) so a reader can
-// compute rounds without a second query.
+// agent, the bot and the CLI read through vm/qrender. Chain state is public,
+// so every value appears as soon as it exists; a subscription buys a realm
+// the right to use a value in its own logic, not secrecy (plan §6.1). Every
+// object carries "now" (block time) so a reader can compute rounds without a
+// second query.
 //
 // Paths:
 //
@@ -26,14 +26,16 @@ import (
 //	json/feed/<id>/rounds[/<count>]
 //	json/feed/<id>/provider/<addr>
 //	json/feed/<id>/providers
+//	json/feed/<id>/subscribers
+//	json/feed/<id>/subscription/<realm path>
 //	json/dispute/<id>
 //	json/disputes[/<from>[/<count>]]
 //	json/credit/<addr>
 //	json/params
 //	json/health
-func renderJSON(parts []string) string {
+func renderJSON(st *core.StateRef, parts []string) string {
 	if len(parts) == 0 {
-		return jsonw.Error("path: json/now | feeds | feed/<id> | feed/<id>/round/<r> | feed/<id>/rounds | feed/<id>/provider/<addr> | feed/<id>/providers | dispute/<id> | disputes | credit/<addr> | params | health")
+		return jsonw.Error("path: json/now | feeds | feed/<id> | feed/<id>/round/<r> | feed/<id>/rounds | feed/<id>/provider/<addr> | feed/<id>/providers | feed/<id>/subscribers | feed/<id>/subscription/<realm> | dispute/<id> | disputes | credit/<addr> | params | health")
 	}
 	switch parts[0] {
 	case "now":
@@ -59,7 +61,7 @@ func renderJSON(parts []string) string {
 			return jsonw.Error("unknown feed")
 		}
 		if len(parts) == 2 {
-			return jsonFeed(f).String()
+			return jsonFeed(st, f).String()
 		}
 		switch parts[2] {
 		case "round":
@@ -76,7 +78,7 @@ func renderJSON(parts []string) string {
 			} else if rid, err = strconv.ParseUint(parts[3], 10, 64); err != nil {
 				return jsonw.Error("bad round id")
 			}
-			return jsonRound(f, rid).String()
+			return jsonRound(st, f, rid).String()
 		case "rounds":
 			count := int64(20)
 			if len(parts) >= 4 {
@@ -86,7 +88,7 @@ func renderJSON(parts []string) string {
 			}
 			a := jsonw.NewArray()
 			core.ReverseIterateRounds(id, int(count), func(rd *core.Round) bool {
-				a.Raw(jsonRoundRecord(f, rd).String())
+				a.Raw(jsonRoundRecord(st, f, rd).String())
 				return false
 			})
 			return jsonNow().Uint("feed", id).Raw("rounds", a.String()).String()
@@ -106,6 +108,24 @@ func renderJSON(parts []string) string {
 				return false
 			})
 			return jsonNow().Uint("feed", id).Raw("providers", a.String()).String()
+		case "subscribers":
+			a := jsonw.NewArray()
+			t := now()
+			core.IterateSubscriptions(id, func(s *core.Subscription) bool {
+				a.Raw(jsonSubscription(s, t).String())
+				return false
+			})
+			return jsonNow().Uint("feed", id).Int("subscriberPrice", f.Spec.SubscriberPrice).Bool("sponsored", f.Spec.Sponsored).Raw("subscribers", a.String()).String()
+		case "subscription":
+			if len(parts) < 4 {
+				return jsonw.Error("realm path missing")
+			}
+			realmPath := strings.Join(parts[3:], "/")
+			s := core.GetSubscription(id, realmPath)
+			if s == nil {
+				return jsonNow().Uint("feed", id).Str("realm", realmPath).Bool("exists", false).Bool("active", false).String()
+			}
+			return jsonSubscription(s, now()).String()
 		}
 		return jsonw.Error("unknown feed sub-path")
 	case "dispute":
@@ -143,7 +163,7 @@ func renderJSON(parts []string) string {
 		if c == nil {
 			return o.Bool("exists", false).String()
 		}
-		return o.Bool("exists", true).Int("balance", c.Balance).Int("spent", c.Spent).Int("reads", c.Reads).Bool("finalOnly", c.FinalOnly).String()
+		return o.Bool("exists", true).Int("balance", c.Balance).Int("spent", c.Spent).String()
 	case "params":
 		return core.ParamsJSON()
 	case "health":
@@ -175,9 +195,9 @@ func jsonNow() *jsonw.Object {
 	return jsonw.New().Int("now", now()).Int("height", runtime.ChainHeight()).Str("live", core.LivePath())
 }
 
-// aged reports whether a value finalised at t may be shown on a free view.
-func aged(f *core.Feed, finalAt int64) bool {
-	return finalAt > 0 && now() >= finalAt+f.Spec.DisputeWindow+param("renderDelay")
+func jsonSubscription(s *core.Subscription, t int64) *jsonw.Object {
+	return jsonNow().Uint("feed", s.Feed).Str("realm", s.Realm).Bool("exists", true).Int("since", s.Since).Int("paidUntil", s.PaidUntil).
+		Int("paid", s.Paid).Int("periods", s.Periods).Bool("active", s.PaidUntil > t)
 }
 
 func jsonSpec(f *core.Feed) *jsonw.Object {
@@ -186,7 +206,7 @@ func jsonSpec(f *core.Feed) *jsonw.Object {
 		Int("decimals", int64(s.Decimals)).Strs("options", s.Options).Int("interval", s.Interval).Int("submitWindow", s.SubmitWindow).
 		Int("resolveAt", s.ResolveAt).Int("bounty", s.Bounty).Str("sources", s.Sources).Int("minProviders", int64(s.MinProviders)).
 		Int("maxProviders", int64(s.MaxProviders)).Int("providerMinStake", s.ProviderMinStake).Int("toleranceBps", s.ToleranceBps).
-		Int("quarantineBps", s.QuarantineBps).Int("disputeWindow", s.DisputeWindow).Int("readPrice", s.ReadPrice).
+		Int("quarantineBps", s.QuarantineBps).Int("disputeWindow", s.DisputeWindow).Int("subscriberPrice", s.SubscriberPrice).
 		Int("subscriptionPrice", s.SubscriptionPrice).Bool("sponsored", s.Sponsored).Int("valueAtStake", s.ValueAtStake).
 		Strs("tags", s.Tags).Str("hash", s.Hash)
 }
@@ -198,7 +218,7 @@ func jsonFeedSummary(f *core.Feed) *jsonw.Object {
 		Bool("haveLast", f.HaveLast).Uint("lastFinalized", f.LastFinalized).Int("openDisputes", f.OpenDisputes)
 }
 
-func jsonFeed(f *core.Feed) *jsonw.Object {
+func jsonFeed(st *core.StateRef, f *core.Feed) *jsonw.Object {
 	slots := jsonw.NewArray()
 	for i := 0; i < agg.MaxSlots; i++ {
 		slots.Str(string(f.SlotAt(i)))
@@ -209,13 +229,9 @@ func jsonFeed(f *core.Feed) *jsonw.Object {
 		Int("activeCount", f.ActiveCount).Raw("slots", slots.String()).
 		Bool("haveLast", f.HaveLast).Uint("lastFinalized", f.LastFinalized).Uint("oldestRound", f.OldestRound).Int("emptyStreak", f.EmptyStreak).
 		Bool("haveValue", f.HaveValue).Uint("lastRound", f.LastRound).Int("lastRoundAt", f.LastRoundAt).Int("lastFinalAt", f.LastFinalAt).Str("lastTier", f.LastTier)
-	if f.HaveValue && aged(f, f.LastFinalAt) {
-		o.Int("value", f.LastValue).Bool("delayed", false)
-	} else {
-		o.Bool("delayed", f.HaveValue)
-	}
 	if f.HaveValue {
-		o.Str("servedTier", servedTier(f, now()))
+		last, _ := st.FeedValues(f.ID)
+		o.Int("value", last).Str("servedTier", servedTier(f, now()))
 	}
 	if cur, ok := schedule(f).Current(now()); ok {
 		o.Uint("currentRound", cur).Int("currentOpenAt", schedule(f).OpenAt(cur)).Int("currentCloseAt", schedule(f).CloseAt(cur))
@@ -227,7 +243,7 @@ func jsonFeed(f *core.Feed) *jsonw.Object {
 }
 
 // jsonRound describes round rid whether or not a record exists yet.
-func jsonRound(f *core.Feed, rid uint64) *jsonw.Object {
+func jsonRound(st *core.StateRef, f *core.Feed, rid uint64) *jsonw.Object {
 	sched := schedule(f)
 	if sched.IsOneOff() && rid != 0 {
 		return jsonNow().Uint("feed", f.ID).Uint("id", rid).Str("status", "none").Bool("exists", false)
@@ -244,10 +260,10 @@ func jsonRound(f *core.Feed, rid uint64) *jsonw.Object {
 		return jsonNow().Uint("feed", f.ID).Uint("id", rid).Str("status", "none").Bool("exists", false).
 			Int("opensAt", sched.OpenAt(rid)).Int("closesAt", sched.CloseAt(rid)).Bool("open", sched.IsOpen(rid, t)).Bool("closed", sched.IsClosed(rid, t))
 	}
-	return jsonRoundRecord(f, rd)
+	return jsonRoundRecord(st, f, rd)
 }
 
-func jsonRoundRecord(f *core.Feed, rd *core.Round) *jsonw.Object {
+func jsonRoundRecord(st *core.StateRef, f *core.Feed, rd *core.Round) *jsonw.Object {
 	sched := schedule(f)
 	t := now()
 	o := jsonNow().Uint("feed", rd.Feed).Uint("id", rd.ID).Str("status", rd.Status).Bool("exists", true).
@@ -261,18 +277,15 @@ func jsonRoundRecord(f *core.Feed, rd *core.Round) *jsonw.Object {
 		}
 	}
 	o.Raw("submitted", submitted.String())
-	final := rd.Status != core.RoundOpen
-	if final && aged(f, rd.FinalisedAt) {
+	if rd.Status != core.RoundOpen {
 		vals := jsonw.NewArray()
 		for i := 0; i < agg.MaxSlots; i++ {
 			if rd.SubmittedMask&(1<<uint(i)) != 0 {
-				vals.Raw(jsonw.New().Int("slot", int64(i)).Str("addr", string(core.SlotHolderAt(f.ID, int64(i), rd.ID))).Int("value", rd.ValueAt(i)).
+				vals.Raw(jsonw.New().Int("slot", int64(i)).Str("addr", string(core.SlotHolderAt(f.ID, int64(i), rd.ID))).Int("value", st.RoundValueAt(f.ID, rd.ID, i)).
 					Bool("eligible", rd.EligibleMask&(1<<uint(i)) != 0).String())
 			}
 		}
-		o.Int("value", rd.Value).Raw("values", vals.String()).Bool("delayed", false)
-	} else {
-		o.Bool("delayed", final)
+		o.Int("value", st.RoundValue(f.ID, rd.ID)).Raw("values", vals.String())
 	}
 	return o
 }

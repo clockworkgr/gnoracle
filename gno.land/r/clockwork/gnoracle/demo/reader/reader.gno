@@ -1,9 +1,10 @@
 // Package reader is an example consumer realm for the local demo (`make
 // demo`): anyone may ask it to read a Gnoracle feed, and it keeps every value
 // it was served together with the block height and chain time of the read,
-// which its page lists. It pays for each read from the credit an operator
-// deposits for its address on the core (`DepositFor`), the way any consumer
-// realm on gno.land would. It is not part of a deployment.
+// which its page lists. Reads cost nothing per call and change nothing, but
+// the core serves them only to realms subscribed to the feed, so someone
+// pays periods for this realm with `SubscribeRealm`, the way any consumer
+// realm on gno.land would be set up. It is not part of a deployment.
 package reader
 
 import (
@@ -43,12 +44,14 @@ func init(cur realm) {
 	selfPath = cur.PkgPath()
 }
 
-// Address is this realm's account: deposit read credit for it on the core
-// with `DepositFor`.
+// Address is this realm's account.
 func Address() address { return chain.PackageAddress(selfPath) }
 
-// Poll reads feedID through the core's paid Read and stores the reading. Any
-// account or realm may call it; the read is charged to this realm's credit.
+// Path is this realm's package path: what `SubscribeRealm` takes.
+func Path() string { return selfPath }
+
+// Poll reads feedID through the core's Read (this realm must be subscribed
+// to the feed) and stores the reading. Any account or realm may call it.
 func Poll(cur realm, feedID uint64) (value int64, round uint64, tier string) {
 	v, dec, rid, _, t := core.Read(cross(cur), feedID)
 	seq++
@@ -83,14 +86,12 @@ func Render(path string) string {
 	var b strings.Builder
 	b.WriteString("# Example consumer realm\n\n")
 	b.WriteString("This realm reads a Gnoracle feed when anyone calls `Poll(feedID)` and keeps what it was served. ")
-	b.WriteString("Each read is paid from the credit deposited for its address on the core.\n\n")
+	b.WriteString("A read costs nothing and changes nothing; the core serves it because this realm is subscribed to the feed.\n\n")
 	b.WriteString("| | |\n|---|---|\n")
-	b.WriteString("| realm address | `" + string(Address()) + "` |\n")
-	credit, spent, reads := int64(0), int64(0), int64(0)
-	if c := core.GetCredit(Address()); c != nil {
-		credit, spent, reads = c.Balance, c.Spent, c.Reads
+	b.WriteString("| realm | `" + selfPath + "` (address `" + string(Address()) + "`) |\n")
+	if len(readings) > 0 {
+		b.WriteString("| subscription | " + subscriptionLine(readings[len(readings)-1].Feed) + " |\n")
 	}
-	b.WriteString("| read credit | " + gnot(credit) + " GNOT left, " + gnot(spent) + " GNOT spent over " + strconv.FormatInt(reads, 10) + " reads |\n")
 	b.WriteString("| readings kept | " + strconv.Itoa(len(readings)) + " |\n")
 	if len(readings) == 0 {
 		b.WriteString("\n_No readings yet: nobody has called `Poll` since this realm was deployed._\n")
@@ -125,12 +126,27 @@ func renderJSON() string {
 		a.Raw(jsonw.New().Int("seq", r.Seq).Int("height", r.Height).Int("time", r.Time).Uint("feed", r.Feed).Uint("round", r.Round).
 			Int("value", r.Value).Int("decimals", r.Decimals).Str("tier", r.Tier).Str("caller", string(r.Caller)).String())
 	}
-	credit := int64(0)
-	if c := core.GetCredit(Address()); c != nil {
-		credit = c.Balance
+	until := int64(0)
+	if len(readings) > 0 {
+		if s := core.GetSubscription(readings[len(readings)-1].Feed, selfPath); s != nil {
+			until = s.PaidUntil
+		}
 	}
-	return jsonw.New().Int("now", time.Now().Unix()).Int("height", runtime.ChainHeight()).Str("address", string(Address())).
-		Int("credit", credit).Int("count", int64(len(readings))).Raw("readings", a.String()).String()
+	return jsonw.New().Int("now", time.Now().Unix()).Int("height", runtime.ChainHeight()).Str("address", string(Address())).Str("path", selfPath).
+		Int("subscribedUntil", until).Int("count", int64(len(readings))).Raw("readings", a.String()).String()
+}
+
+// subscriptionLine describes this realm's subscription to a feed.
+func subscriptionLine(feed uint64) string {
+	s := core.GetSubscription(feed, selfPath)
+	if s == nil {
+		return "none on feed " + strconv.FormatUint(feed, 10) + " (reads are refused until someone runs `SubscribeRealm`)"
+	}
+	state := "active"
+	if s.PaidUntil <= time.Now().Unix() {
+		state = "lapsed"
+	}
+	return "feed " + strconv.FormatUint(feed, 10) + ": " + state + " until " + time.Unix(s.PaidUntil, 0).UTC().Format("2006-01-02 15:04:05") + " UTC, " + gnot(s.Paid) + " GNOT paid over " + strconv.FormatInt(s.Periods, 10) + " period(s)"
 }
 
 // fixed prints a value with the feed's decimals.

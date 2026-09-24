@@ -70,8 +70,8 @@ Goals
 - Feeds usable by any realm through one permanent import path, with a status
   field that tells the consumer whether a value is consensus, provisional or
   final.
-- Provider set per feed, bonded in GNOT, rewarded from subscriptions, metered
-  reads and bounties, penalised for missed rounds, slashed after a lost
+- Provider set per feed, bonded in GNOT, rewarded from subscriptions and
+  bounties, penalised for missed rounds, slashed after a lost
   dispute.
 - Disputes bonded in GNOT, decided by PYTH stakers under commit-reveal with
   sealed voting weights, a supermajority, one appeal round, and penalties for
@@ -105,7 +105,7 @@ Non-goals for v1
  Sponsors ──monthly subscription──────────────────────────────────────────► feed pool
  Providers ──stake GNOT, submit values each round──────────────────────────► rounds
                                                                              │ aggregate (median / majority), status tier
- Consumer realm ──Read(feed), pays metered credit──────────────────────────► value + status
+ Consumer realm ──Read(feed), subscribed per period ──────────────────────────► value + tier
                                                                              │
  Disputer ──bond GNOT, propose corrected value + slash tier──► dispute ──commit/reveal──► DAO verdict (+ appeal)
                                                                              │
@@ -117,7 +117,7 @@ Non-goals for v1
 | Role | Capital | Earns | Risks |
 |---|---|---|---|
 | Requester | feed deposit (GNOT), first subscription period or bounty | a live feed | deposit and prepayment are escrowed until activation: the deposit is refunded on activation, the prepayment becomes the first period or the bounty; both are refunded on rejection (spam forfeits the deposit only) |
-| Sponsor | monthly subscription per feed (shared) | fresh-tier access for named consumer realms | none beyond the fee |
+| Sponsor | monthly subscription per feed (shared) | a funded feed for everyone who depends on it | none beyond the fee |
 | Provider | GNOT stake per feed | share of the feed's round pool, alerter and cranker tips | miss penalties, jail, minor (5%) or major (100%) slash after a lost dispute |
 | Consumer realm | prepaid GNOT credits | data | none beyond fees |
 | Disputer | GNOT bond | bond back plus 50% of what the losing providers forfeit | bond if the DAO upholds the value |
@@ -305,7 +305,7 @@ economic fields can be changed by `feed-update` proposals.
   "toleranceBps": 100,
   "quarantineBps": 1000,
   "disputeWindow": 43200,
-  "readPrice": 20000,
+  "subscriberPrice": 10000000,
   "subscriptionPrice": 1000000000,
   "tags": ["price", "gnot"]
 }
@@ -332,8 +332,8 @@ Validation (fixed rules)
   price feeds, Tellor's figure) that the acceptance checklist compares against
   and that `maxValueAtRisk` reflects.
 - `toleranceBps` in [1, 5000]; `quarantineBps` in [toleranceBps, 10000].
-- `readPrice` at least `readPriceFloor` (default 0.002 GNOT) or zero for a
-  sponsored feed; `subscriptionPrice` at least `subscriptionFloor` (default
+- `subscriberPrice` at least `subscriberFloor` per period, or zero for a
+  sponsored feed (one-off feeds have none: outcomes are open to every realm); `subscriptionPrice` at least `subscriptionFloor` (default
   100 GNOT per 30 d).
 - `sources` at most 2000 bytes; `name` at most 64; `description` at most 512.
   A spec is 1 to 3 kB, so 0.1 to 0.3 GNOT of storage deposit paid by the
@@ -425,7 +425,8 @@ bptree keys are fixed-width big-endian so ranges scan in order.
 | `activeSet` | feedID (8) + slot (1) | addr (at most 15) |
 | `rounds` | feedID (8) + roundID (8) | Round{status, tier, value, submittedMask, eligibleMask, pool, finalisedAt, disputeID} (~110) |
 | `submissions` | feedID + roundID + slot (1) | value int64 + submittedAt (~24) |
-| `credits` | consumer addr | Credit{balance, spentTotal, lastRead, finalOnly} (~48) |
+| `credits` | account addr | Credit{balance, spent} (~32): a realm requester's prepaid balance |
+| `subscriptions` | feedID (8) + realm path | Subscription{realm, since, paidUntil, paid, periods} (~90) |
 | `disputes` | disputeID (8) | Dispute{feedID, roundID, disputer, bond, proposedValue, tier, round, state, daoBallotID, kourtRecordID, outcome} (~220) |
 | `params` | name | typed value with bounds and last-change height |
 
@@ -486,7 +487,7 @@ retired feed past `retentionAfterDeprecate` keeps nothing.
 | Lost dispute, minor tier | slash `minorSlashBps` of stake | 500 bps (5%) | 50% disputer, 30% coherent voters, 20% treasury |
 | Lost dispute, major tier | slash `majorSlashBps` and forced unbond (ejection) | 10000 bps (100%) | same split |
 | Three minor slashes within an epoch | escalates to major | fixed | same split |
-| Eligible submission in a finalised round | equal share of the round pool | pool = subscription pool / rounds per period + 70% of metered read fees since the last finalisation + miss slashes + one-off bounty share + bootstrap subsidy | provider reward balance (pull) |
+| Eligible submission in a finalised round | equal share of the round pool | pool = subscription pool / rounds per period + miss slashes + one-off bounty share + bootstrap subsidy | provider reward balance (pull) |
 | Finalising a round | tip | `crankTipBps` 100 (1%) of the round pool | cranker |
 
 Why two tiers: Tellor Layer's 1/5/100% tiers are the only provider-slash
@@ -523,50 +524,67 @@ controls below that figure, or to wait for `final`.
 
 ### 6.1 Reading
 
+Chain state is public. Every value a feed ever served can be read off the
+free pages and `:json` views, by people and by `vm/qeval`, the moment it
+exists. What the protocol can gate is on-chain use: whether another realm may
+consume a value inside its own logic. That gate is a subscription per realm
+and per period; nothing is metered per read, because a per-read charge would
+only tax the honest.
+
 Consumer realms import the permanent `core` realm and call:
 
 ```go
-func Read(cur realm, feedID uint64) (value int64, decimals int, roundID uint64, updatedAt int64, tier string)
-func ReadOption(cur realm, feedID uint64) (option int, label string, roundID uint64, updatedAt int64, tier string)
+func Read(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string)
+func ReadFinal(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, finalisedAt int64, tier string)
 func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
-Render(":json/feed/<id>") string           // machine view (Appendix D), fresh values delayed
+Render(":json/feed/<id>") string           // machine view (Appendix D): everything, at once
 ```
 
-`Read` is a crossing call because it debits the caller's credit and writes.
-The returned `tier` is `consensus`, `provisional`, `final`, `disputed`,
-`stale` (no aggregated round within two intervals), `unfunded` (appended,
-e.g. `final,unfunded`) or `none`. A consumer that sets `finalOnly` on its
-credit record receives the latest `final` round instead and pays half price.
+`Read` is a crossing call so the caller is known; it changes no state and
+costs nothing per call. It serves a realm when the feed is one-off (an
+outcome is public once final), when the feed is `sponsored` (its requester
+pays for everyone), when the caller is the feed's own realm requester, or
+when the caller's package path holds a subscription that covers now
+(`SubscribeRealm`). An account calling `Read` is sent to the pages. The
+permanent realm's getters carry no values (`GetFeed` and `GetRound` expose
+everything but the numbers; the implementation reads them through its gated
+`StateRef`), so a realm cannot route around the gate through state access.
 
-Free access exists and is bounded on purpose: `Render` and the `:json` views are
-non-crossing and any realm or `vm/qeval` can call them, so they show values
-only once `final` and at least `renderDelay` (default 10 minutes, Pyth Network Pro's
-delayed-tier convention) old. Fresh data costs a credit; delayed data is a
-public good. One-off outcomes become public once final, which a court of
-record implies anyway; requesters pay for those through the bounty.
+The returned `tier` is `consensus`, `provisional`, `final`, `disputed` (the
+last final round is served instead of the disputed one, and a voided latest
+round falls back the same way), `stale` (no aggregated round within two
+intervals) or `none`, with `,unfunded` appended while the feed's pool is
+empty. `ReadFinal` always serves the last final round. A value is served at
+the moment a realm asks, inside that realm's own transaction, so a consumer
+that reads when it needs the number is never stale; one that polls and
+caches (the demo's reader realm) is as fresh as its last poll.
 
 ### 6.2 Paying
 
-Subscriptions are the primary revenue because they are the only model that
-has demonstrably reached sustainability (Chainlink feeds on BNB and Polygon,
-Pyth Network Pro; RESEARCH §3.2). Metered reads are secondary.
+Two flows fund a feed. Both are priced per `subscriptionPeriod` (30 days),
+both are prepaid 1 to 12 periods at a time, and both split the same way
+(fixed at the time of each payment): 70% to the feed's pool, dripped to the
+providers per round, 15% to the DAO staker accumulator, 15% to the treasury
+(which funds voter gas rebates, watcher bounties and the bootstrap subsidy).
 
 - `Sponsor(cur, feedID, periods)`: `-send` `subscriptionPrice x periods`
-  (default 1,000 GNOT per 30 d per feed, about $62), 1 to 12 periods at a
-  time. Several sponsors may pay for the same feed; each payment extends
-  `paidUntil` and adds its provider share to the pool (the drip per round is
+  (floor 100 GNOT per period, typically around 1,000 GNOT). The requester
+  pays the first period with the proposal; sponsors pay further ones; each
+  payment extends `paidUntil` and adds to the pool (the drip per round is
   fixed at activation from `subscriptionPrice`, so more money lasts longer
-  rather than paying more per round). A sponsor names up to 8 consumer
-  realm addresses whose metered reads on that feed are free; a consumer
-  keeps whichever sponsorship covers it longest.
-- `DepositFor(cur, consumer address)`: `-send` ugnot credits a consumer realm
-  for metered reads (a realm cannot attach `-send` to its own calls; the
-  call-scoped `CallSend` RFC of 2026-09-19 would change that and is tracked).
-  Each `Read` by a non-sponsored consumer debits `readPrice` (default 0.02
-  GNOT).
-- Fee split (fixed at the time of each payment): 70% to the feed's round
-  pool, 15% to the DAO staker accumulator, 15% to the treasury (which funds
-  voter gas rebates, watcher bounties and the bootstrap subsidy).
+  rather than paying more per round). A feed whose pool is empty is
+  `unfunded`; after enough empty rounds it is deprecated.
+- `SubscribeRealm(cur, feedID, pkgPath, periods)`: `-send` `subscriberPrice
+  x periods` (a spec field with the DAO floor `subscriberFloor`), payable by
+  anyone for any realm; a realm caller pays from its prepaid balance. It
+  extends that realm's `paidUntil` on that feed. Sponsored and one-off feeds
+  take none: they are open to every realm.
+- `DepositFor(cur, account)`: `-send` into a prepaid balance. A realm cannot
+  attach coins to its own calls (the call-scoped `CallSend` RFC of
+  2026-09-19 would change that and is tracked), so a realm that requests
+  feeds, funds bounties or subscribes is funded this way by its operator;
+  refunds owed to a realm land in the same balance and `WithdrawCredit`
+  takes it out. Reads never touch it.
 - Bootstrap subsidy: the treasury may fund a provider subsidy per feed, only
   for feeds with at least one paying sponsor, capped at a fixed budget for 12
   months and decaying 10% per month (Pyth Network's finite pool ran out in 19 months
@@ -875,7 +893,7 @@ defaults above and lets the DAO set mainnet values with counsel's input.
 ### 8.5 Fee share for stakers
 
 `accFeePerShare` (scaled 1e12) is bumped whenever `core` forwards the
-stakers' 15% of a subscription, read fee or forfeiture; each member has
+stakers' 15% of a subscription payment or forfeiture; each member has
 `feeDebt`. `ClaimFees(cur)` pays `staked x accFeePerShare - feeDebt` in ugnot.
 Unbonding stake does not earn. With `workGate` on, a member who revealed in
 fewer than half of the disputes sealed during a 30-day window forfeits that
@@ -1149,7 +1167,7 @@ func ProposeFeed(cur realm, specJSON string) uint64
 func ActivateFeed(cur realm, feedID uint64)
 func DeprecateFeed(cur realm, feedID uint64, reason string)
 func UpdateFeed(cur realm, feedID uint64, changesJSON string)
-func Sponsor(cur realm, feedID uint64, periods int64, consumersCSV string)
+func Sponsor(cur realm, feedID uint64, periods int64)
 func FundBounty(cur realm, feedID uint64)
 func Finalize(cur realm, feedID, roundID uint64)
 func CatchUp(cur realm, feedID uint64, maxRounds int64) int64
@@ -1164,10 +1182,11 @@ func Withdraw(cur realm, feedID uint64) int64
 func Unjail(cur realm, feedID uint64)
 func ClaimRewards(cur realm, feedID uint64) int64
 func ForceUnbond(cur realm, feedID uint64, provider address)
-func DepositFor(cur realm, consumer address)
+func DepositFor(cur realm, account address)
 func WithdrawCredit(cur realm, amount int64)
-func SetFinalOnly(cur realm, on bool)
+func SubscribeRealm(cur realm, feedID uint64, pkgPath string, periods int64)
 func Read(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, updatedAt int64, tier string)
+func ReadFinal(cur realm, feedID uint64) (value int64, decimals int64, roundID uint64, finalisedAt int64, tier string)
 func ReadRound(cur realm, feedID, roundID uint64) (value int64, tier string, finalisedAt int64)
 func Dispute(cur realm, feedID, roundID uint64, proposedValue int64, tier, evidence string) uint64
 func Appeal(cur realm, disputeID uint64)
@@ -1215,7 +1234,9 @@ func GetProvider(feed uint64, addr address) *Provider
 func GetRound(feed, round uint64) *Round
 func GetCredit(addr address) *Credit
 func GetSponsor(feed uint64, addr address) *Sponsorship
-func SponsorOf(feed uint64, consumer address) *Sponsorship
+func GetSubscription(feed uint64, pkgPath string) *Subscription
+func IsSubscribed(feed uint64, pkgPath string, t int64) bool
+func IterateSubscriptions(feed uint64, fn func(*Subscription) bool)
 func GetDispute(id uint64) *DisputeRecord
 func TrustedCap(pkgPath string) int64
 func SlotHolderAt(feed uint64, slot int64, r uint64) address
@@ -1404,6 +1425,7 @@ Every `chain.Emit` in the permanent realms and their implementations, with attri
 | `ProviderSlashed` | `feed`, `provider`, `amount`, `reason` |
 | `ProviderUnbonding` | `feed`, `provider`, `readyAt` |
 | `ProviderWithdrawn` | `feed`, `provider`, `amount` |
+| `RealmSubscribed` | `feed`, `realm`, `amount`, `paidUntil` |
 | `ReleaseAccepted` | `path` |
 | `ReleaseRolledBack` | `path` |
 | `RewardsClaimed` | `feed`, `provider`, `amount` |
@@ -1459,8 +1481,8 @@ Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 5
 |---|---|---|---|---|---|
 | `feedDeposit` | 5,000,000 | 1,000,000 | 1,000 GNOT/PYTH (1000000000) | 5000 | deposit attached to a feed proposal, refunded unless spam |
 | `providerMinStakeFloor` | 10,000 GNOT/PYTH (10000000000) | 1,000 GNOT/PYTH (1000000000) | 1,000,000 GNOT/PYTH (1000000000000) | 5000 | smallest providerMinStake a spec may set |
-| `readPriceFloor` | 2,000 | 0 | 1,000,000 | 5000 | smallest readPrice a non-sponsored spec may set |
 | `subscriptionFloor` | 100 GNOT/PYTH (100000000) | 10,000,000 | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest subscriptionPrice per period |
+| `subscriberFloor` | 2,000 | 0 | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest subscriberPrice per period a non-sponsored recurring spec may set |
 | `bountyFloor` | 50,000,000 | 1,000,000 | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest one-off bounty |
 | `subscriptionPeriod` | 30 d (2592000 s) | 7 d (604800 s) | 90 d (7776000 s) | 5000 | length of one subscription period |
 | `maxCatchUpRounds` | 48 | 1 | 500 | 5000 | stale rounds written off per CatchUp call |
@@ -1468,7 +1490,6 @@ Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 5
 | `minRoundsKept` | 64 | 8 | 10,000 | 5000 | rounds always kept per feed regardless of age |
 | `retentionAfterDeprecate` | 90 d (7776000 s) | 30 d (2592000 s) | 730 d (63072000 s) | 5000 | seconds after deprecation before a feed may be pruned |
 | `deadFeedRounds` | 168 | 24 | 10,000 | 5000 | consecutive empty rounds after which a feed is deprecated on prune |
-| `renderDelay` | 600 | 0 | 1 d (86400 s) | 5000 | seconds a final value must age before free views show it |
 | `maxIncentivePay` | 10,000,000 | 0 | 1,000 GNOT/PYTH (1000000000) | 5000 | largest fee-pool payment a release may make per call (tips, bounties) |
 | `trustedOneOffCap` | 50,000 GNOT/PYTH (50000000000) | 0 | 10,000,000 GNOT/PYTH (10000000000000) | 5000 | largest declared value at stake a trusted requester may self-activate |
 | `missSlashBps` | 50 | 0 | 500 | 5000 | slash per missed round on a funded feed |
@@ -1485,9 +1506,8 @@ Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 5
 | `minorsToMajor` | 3 | 2 | 10 | 5000 | minor slashes within a providerEpoch that escalate to major |
 | `unbondPeriod` | 14 d (1209600 s) | 7 d (604800 s) | 60 d (5184000 s) | 5000 | seconds between RequestUnbond and Withdraw |
 | `crankTipBps` | 100 | 0 | 1,000 | 5000 | share of a round pool paid to whoever finalises it |
-| `feeSplitProvidersBps` | 7,000 | 0 | 10,000 | 5000 | share of subscriptions and read fees to the feed pool |
-| `feeSplitStakersBps` | 1,500 | 0 | 5,000 | 5000 | share of subscriptions and read fees to DAO stakers |
-| `readPriceFinalBps` | 5,000 | 0 | 10,000 | 5000 | price of a final-only read as a share of readPrice |
+| `feeSplitProvidersBps` | 7,000 | 0 | 10,000 | 5000 | share of subscription payments (feed funding and realm subscriptions) to the feed pool |
+| `feeSplitStakersBps` | 1,500 | 0 | 5,000 | 5000 | share of subscription payments to DAO stakers |
 | `minDisputeBond` | 2,500 GNOT/PYTH (2500000000) | 100 GNOT/PYTH (100000000) | 100,000 GNOT/PYTH (100000000000) | 5000 | smallest dispute bond |
 | `disputeBondBps` | 1,000 | 100 | 10,000 | 5000 | dispute bond as a share of the feed's active stake |
 | `disputeEscalationWindow` | 7 d (604800 s) | 1 d (86400 s) | 90 d (7776000 s) | 5000 | seconds within which repeat disputes on a feed double the bond |

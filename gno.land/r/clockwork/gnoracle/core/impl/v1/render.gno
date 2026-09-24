@@ -7,15 +7,17 @@ import (
 	"gno.land/r/clockwork/gnoracle/core"
 )
 
-// Render serves the gnoweb pages. Values appear only once final and older
-// than renderDelay, so the free view never leaks fresh data (plan §6.1).
+// Render serves the gnoweb pages. Everything the chain holds is public, so
+// the pages show every value at once; what a subscription buys is a realm's
+// right to use a value inside its own logic (plan §6.1).
 func (*implV1) Render(_ int, rlm realm, path string) string {
+	st := core.Store(0, rlm)
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	switch {
 	case parts[0] == "json":
-		return renderJSON(parts[1:])
+		return renderJSON(st, parts[1:])
 	case path == "" || parts[0] == "feeds":
-		return renderFeeds(parts)
+		return renderFeeds(st, parts)
 	case parts[0] == "disputes":
 		return renderDisputes()
 	case parts[0] == "dispute" && len(parts) >= 2:
@@ -30,17 +32,20 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 			return "unknown feed"
 		}
 		if len(parts) >= 3 && parts[2] == "rounds" {
-			return renderRounds(id)
+			return renderRounds(st, id)
 		}
-		return renderFeed(id)
+		if len(parts) >= 3 && parts[2] == "subscribers" {
+			return renderSubscribers(id)
+		}
+		return renderFeed(st, id)
 	case parts[0] == "provider" && len(parts) >= 3:
 		id, err := strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
 			return "unknown feed"
 		}
 		return renderProvider(id, address(parts[2]))
-	case parts[0] == "consumer" && len(parts) >= 2:
-		return renderConsumer(address(parts[1]))
+	case (parts[0] == "account" || parts[0] == "consumer") && len(parts) >= 2:
+		return renderAccount(address(parts[1]))
 	case parts[0] == "health":
 		return "# Health\n\n```\n" + core.Health() + "\n```\n"
 	case parts[0] == "params":
@@ -49,11 +54,11 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 	return "not found"
 }
 
-func renderFeeds(parts []string) string {
+func renderFeeds(st *core.StateRef, parts []string) string {
 	var b strings.Builder
 	b.WriteString("# Gnoracle\n\nAn oracle DAO on gno.land. Serving `" + core.LivePath() + "`.\n\n")
 	b.WriteString("Pages: [feeds](:feeds) · [disputes](:disputes) · [health](:health) · [parameters](:params) · [releases](:releases)\n\n")
-	b.WriteString("## Feeds\n\n| id | name | kind | status | providers | value (delayed) |\n|---|---|---|---|---|---|\n")
+	b.WriteString("## Feeds\n\n| id | name | kind | status | providers | value |\n|---|---|---|---|---|---|\n")
 	page := 0
 	if len(parts) >= 2 {
 		if p, err := strconv.Atoi(parts[1]); err == nil && p >= 0 {
@@ -63,7 +68,7 @@ func renderFeeds(parts []string) string {
 	const size = 25
 	core.IterateFeeds(page*size, size, func(f *core.Feed) bool {
 		b.WriteString("| [" + u(f.ID) + "](:feed/" + u(f.ID) + ") | " + esc(f.Spec.Name) + " | " + f.Spec.Kind + " | " + f.Status +
-			" | " + i(f.ActiveCount) + "/" + strconv.Itoa(f.Spec.MaxProviders) + " | " + delayedValue(f) + " |\n")
+			" | " + i(f.ActiveCount) + "/" + strconv.Itoa(f.Spec.MaxProviders) + " | " + lastValue(st, f) + " |\n")
 		return false
 	})
 	total := int(core.FeedCount())
@@ -73,17 +78,13 @@ func renderFeeds(parts []string) string {
 	return b.String()
 }
 
-// delayedValue shows the served value only once it is final and older than
-// renderDelay.
-func delayedValue(f *core.Feed) string {
+// lastValue shows the served value and its round.
+func lastValue(st *core.StateRef, f *core.Feed) string {
 	if !f.HaveValue {
 		return "—"
 	}
-	t := now()
-	if t < f.LastFinalAt+f.Spec.DisputeWindow+param("renderDelay") {
-		return "(fresh; read on-chain)"
-	}
-	return formatValue(f, f.LastValue) + " @ round " + u(f.LastRound)
+	last, _ := st.FeedValues(f.ID)
+	return formatValue(f, last) + " @ round " + u(f.LastRound)
 }
 
 func formatValue(f *core.Feed, v int64) string {
@@ -109,7 +110,7 @@ func formatValue(f *core.Feed, v int64) string {
 	return out
 }
 
-func renderFeed(id uint64) string {
+func renderFeed(st *core.StateRef, id uint64) string {
 	f := core.GetFeed(id)
 	if f == nil {
 		return "unknown feed"
@@ -133,9 +134,16 @@ func renderFeed(id uint64) string {
 	b.WriteString("| providers | " + i(f.ActiveCount) + " of " + strconv.Itoa(sp.MaxProviders) + " (min " + strconv.Itoa(sp.MinProviders) + "), min stake " + i(sp.ProviderMinStake) + " ugnot |\n")
 	b.WriteString("| tolerance / quarantine | " + i(sp.ToleranceBps) + " / " + i(sp.QuarantineBps) + " bps |\n")
 	b.WriteString("| dispute window | " + i(sp.DisputeWindow) + " s |\n")
-	b.WriteString("| read price | " + i(sp.ReadPrice) + " ugnot |\n")
+	switch {
+	case !sp.IsRecurring():
+		b.WriteString("| realm access | every realm may read a one-off outcome |\n")
+	case sp.Sponsored:
+		b.WriteString("| realm access | sponsored: every realm may read |\n")
+	default:
+		b.WriteString("| realm access | " + i(sp.SubscriberPrice) + " ugnot per period per realm, " + strconv.Itoa(subscriberCount(id, now())) + " subscribed ([subscribers](:feed/" + u(id) + "/subscribers)) |\n")
+	}
 	b.WriteString("| value at risk | " + i(valueAtRisk(f)) + " ugnot |\n")
-	b.WriteString("| last value | " + delayedValue(f) + " (tier " + servedTier(f, now()) + ") |\n")
+	b.WriteString("| last value | " + lastValue(st, f) + " (tier " + servedTier(f, now()) + ") |\n")
 	b.WriteString("| spec hash | `" + sp.Hash + "` |\n\n")
 	b.WriteString("Sources: " + esc(sp.Sources) + "\n\n")
 	b.WriteString("## Providers\n\n| slot | address | stake | misses | strikes | rewards |\n|---|---|---|---|---|---|\n")
@@ -174,20 +182,17 @@ func valueAtRisk(f *core.Feed) int64 {
 	return budget / 2 * threshold / n
 }
 
-func renderRounds(id uint64) string {
+func renderRounds(st *core.StateRef, id uint64) string {
 	f := core.GetFeed(id)
 	if f == nil {
 		return "unknown feed"
 	}
 	var b strings.Builder
-	b.WriteString("# Feed " + u(id) + " rounds\n\n| round | status | tier | value (delayed) | eligible | pool | finalised |\n|---|---|---|---|---|---|---|\n")
-	t := now()
+	b.WriteString("# Feed " + u(id) + " rounds\n\n| round | status | tier | value | eligible | pool | finalised |\n|---|---|---|---|---|---|---|\n")
 	core.ReverseIterateRounds(id, 50, func(rd *core.Round) bool {
-		val := "(fresh)"
-		if rd.Status != core.RoundAggregated {
-			val = "—"
-		} else if t >= rd.FinalisedAt+f.Spec.DisputeWindow+param("renderDelay") {
-			val = formatValue(f, rd.Value)
+		val := "—"
+		if rd.Status == core.RoundAggregated {
+			val = formatValue(f, st.RoundValue(id, rd.ID))
 		}
 		b.WriteString("| " + u(rd.ID) + " | " + rd.Status + " | " + rd.Tier + " | " + val + " | " + strconv.Itoa(popcount(rd.EligibleMask)) + "/" + strconv.Itoa(popcount(rd.SubmittedMask)) + " | " + i(rd.Pool) + " | " + i(rd.FinalisedAt) + " |\n")
 		return false
@@ -209,12 +214,39 @@ func renderProvider(id uint64, addr address) string {
 	return b.String()
 }
 
-func renderConsumer(addr address) string {
+func renderAccount(addr address) string {
 	c := core.GetCredit(addr)
 	if c == nil {
-		return "no credit record"
+		return "no prepaid balance for " + string(addr)
 	}
-	return "# Consumer " + string(addr) + "\n\n| | |\n|---|---|\n| balance | " + i(c.Balance) + " |\n| spent | " + i(c.Spent) + " |\n| reads | " + i(c.Reads) + " |\n| final only | " + strconv.FormatBool(c.FinalOnly) + " |\n"
+	return "# Prepaid balance of " + string(addr) + "\n\nA realm cannot attach coins to its own calls; this balance pays its feed requests, bounties and subscriptions, and receives its refunds.\n\n| | |\n|---|---|\n| balance | " + i(c.Balance) + " ugnot |\n| spent | " + i(c.Spent) + " ugnot |\n"
+}
+
+// subscriberCount is the number of realms whose subscription covers t.
+func subscriberCount(feed uint64, t int64) int {
+	n := 0
+	core.IterateSubscriptions(feed, func(s *core.Subscription) bool {
+		if s.PaidUntil > t {
+			n++
+		}
+		return false
+	})
+	return n
+}
+
+func renderSubscribers(id uint64) string {
+	f := core.GetFeed(id)
+	if f == nil {
+		return "unknown feed"
+	}
+	var b strings.Builder
+	b.WriteString("# Feed " + u(id) + " subscribers\n\nRealms that may `Read` this feed, and until when (chain time). `SubscribeRealm <feed> <realm path> <periods>` with " + i(f.Spec.SubscriberPrice) + " ugnot per period adds or extends one.\n\n| realm | since | paid until | paid | periods | active |\n|---|---|---|---|---|---|\n")
+	t := now()
+	core.IterateSubscriptions(id, func(s *core.Subscription) bool {
+		b.WriteString("| `" + s.Realm + "` | " + i(s.Since) + " | " + i(s.PaidUntil) + " | " + i(s.Paid) + " | " + i(s.Periods) + " | " + strconv.FormatBool(s.PaidUntil > t) + " |\n")
+		return false
+	})
+	return b.String()
 }
 
 func popcount(m uint32) int {

@@ -83,7 +83,7 @@ type CrankConfig struct {
 var DefaultEvents = []string{
 	"DisputeOpened", "DisputeBallotOpened", "DisputeRolled", "AppealOpened", "DisputeDecided", "DisputeResolved",
 	"ProposalCreated", "ProposalStatus", "ProviderJailed", "ProviderSlashed", "ProviderEjected", "KourtDissent",
-	"FeedProposed", "FeedActivated", "FeedDeprecated", "FeedUnfunded", "FeedReopened",
+	"FeedProposed", "FeedActivated", "FeedDeprecated", "FeedUnfunded", "FeedReopened", "RealmSubscribed", "Sponsored",
 	"ReleaseAccepted", "ReleaseRolledBack", "Frozen", "AuthorityProposed", "AuthorityTransferred", "AuthorityCancelled",
 	"ParamChanged", "ParamDefined", "IncentivePaid",
 	"UpgradeProposed", "UpgradeAccepted", "UpgradeRolledBack", "UpgradeFrozen", "UpgradeWithdrawn",

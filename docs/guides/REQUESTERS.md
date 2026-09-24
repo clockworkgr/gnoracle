@@ -23,7 +23,7 @@ requests themselves.
   "toleranceBps": 100,
   "quarantineBps": 1000,
   "disputeWindow": 43200,
-  "readPrice": 20000,
+  "subscriberPrice": 10000000,
   "subscriptionPrice": 1000000000,
   "tags": ["price", "gnot"]
 }
@@ -45,7 +45,6 @@ One-off:
   "maxProviders": 5,
   "providerMinStake": 10000000000,
   "disputeWindow": 86400,
-  "readPrice": 2000,
   "valueAtStake": 20000000
 }
 ```
@@ -71,7 +70,7 @@ the prepaid period becomes the first subscription (a bounty becomes the
 pool). A request the DAO does not want is closed with a `feed-deprecate`
 proposal on the proposed feed, which refunds the deposit and the prepayment;
 with the reason `spam` the deposit is forfeited and the prepayment still
-returns. A realm that proposes gets refunds as read credit, since realms
+returns. A realm that proposes gets refunds into its prepaid balance, since realms
 cannot receive coins from calls.
 
 Trusted requesters (allowlisted realm paths with a cap set by the DAO,
@@ -88,5 +87,5 @@ community. `gnoracle feed <id>` shows `activeCount` against `maxProviders`;
 `gnoracle rounds <id>` shows values arriving.
 
 Changing a live spec (`feed-update` proposal) is limited to the fields that
-do not change the meaning of past rounds: `readPrice`, `subscriptionPrice`,
+do not change the meaning of past rounds: `subscriberPrice`, `subscriptionPrice`,
 `providerMinStake`, `toleranceBps`, `quarantineBps` and `disputeWindow`.

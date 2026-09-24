@@ -67,7 +67,7 @@ func install(cur realm) {
 
 func TestReaderRecordsWhatItIsServed(cur realm, t *testing.T) {
 	install(cur)
-	spec := `{"name":"DEMO/USD","kind":"recurring","valueType":"numeric","decimals":6,"interval":600,"submitWindow":300,"sources":"x","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":2000,"disputeWindow":7200,"readPrice":20000,"subscriptionPrice":100000000}`
+	spec := `{"name":"DEMO/USD","kind":"recurring","valueType":"numeric","decimals":6,"interval":600,"submitWindow":300,"sources":"x","minProviders":2,"maxProviders":3,"providerMinStake":1000000000,"toleranceBps":100,"quarantineBps":2000,"disputeWindow":7200,"subscriberPrice":20000,"subscriptionPrice":100000000}`
 	testing.SetRealm(testing.NewUserRealm(watcher))
 	pay(coreAddr, 105*gnot)
 	id := core.ProposeFeed(cross(cur), spec)
@@ -80,17 +80,19 @@ func TestReaderRecordsWhatItIsServed(cur realm, t *testing.T) {
 		core.Register(cross(cur), id, "")
 	}
 
-	// without credit the realm cannot read
+	// until someone subscribes the realm, the core refuses its reads
 	testing.SetRealm(testing.NewUserRealm(watcher))
 	nosend()
 	uassert.Equal(t, 0, reader.Count())
 	uassert.True(t, strings.Contains(reader.Render(""), "No readings yet"))
+	uassert.AbortsContains(t, cur, "not subscribed", func() { reader.Poll(cross(cur), id) })
 
-	// an operator funds the realm's reads; before any value the read is free
-	// and served as "none"
+	// anyone pays a period for the realm; before any value the read is
+	// served as "none"
 	testing.SetRealm(testing.NewUserRealm(watcher))
-	pay(coreAddr, 5*gnot)
-	core.DepositFor(cross(cur), reader.Address())
+	pay(coreAddr, 1*gnot)
+	core.SubscribeRealm(cross(cur), id, reader.Path(), 1)
+	uassert.True(t, core.IsSubscribed(id, reader.Path(), core.Now()))
 	testing.SetRealm(testing.NewUserRealm(watcher))
 	nosend()
 	v, rid, tier := reader.Poll(cross(cur), id)
@@ -119,9 +121,7 @@ func TestReaderRecordsWhatItIsServed(cur realm, t *testing.T) {
 	uassert.Equal(t, v, last.Value)
 	uassert.Equal(t, testing.GetContext().Height, last.Height)
 	uassert.Equal(t, watcher, last.Caller)
-	c := core.GetCredit(reader.Address())
-	uassert.Equal(t, int64(5*gnot-20_000), c.Balance) // one paid read
-	uassert.Equal(t, int64(1), c.Reads)
+	uassert.Equal(t, int64(1*gnot), core.GetSubscription(id, reader.Path()).Paid) // nothing per read
 
 	// the page lists newest first with the height, the machine view agrees
 	page := reader.Render("")
@@ -134,6 +134,9 @@ func TestReaderRecordsWhatItIsServed(cur realm, t *testing.T) {
 	uassert.NoError(t, err)
 	n, _ := node.MustKey("count").GetNumeric()
 	uassert.Equal(t, float64(2), n)
+	until, _ := node.MustKey("subscribedUntil").GetNumeric()
+	uassert.True(t, until > 0)
+	uassert.True(t, strings.Contains(page, "| subscription | feed "+strconv.FormatUint(id, 10)+": active until"))
 	recs, _ := node.MustKey("readings").GetArray()
 	h, _ := recs[0].MustKey("height").GetNumeric()
 	uassert.Equal(t, float64(last.Height), h)
