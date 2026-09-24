@@ -444,7 +444,7 @@ func (*implKourtV3) Render(_ int, rlm realm, path string) string {
 	}
 	var b strings.Builder
 	b.WriteString("# Gnoracle Kourt mirror\n\n")
-	b.WriteString("court `" + kourt.CourtSlug + "` on `" + kourtPath + "`")
+	b.WriteString("Every resolved dispute is filed as a claim in the DAO's court [" + kourt.CourtSlug + "](" + courtURL + ") on Kourt v3 (`" + kourtPath + "`)")
 	if kv.Exists(kourt.CourtSlug) {
 		b.WriteString(" · float " + cc(float()) + " CC (" + cc(spendable()) + " free)")
 	} else {
@@ -455,24 +455,45 @@ func (*implKourtV3) Render(_ int, rlm realm, path string) string {
 		id, err := strconv.ParseUint(strings.TrimPrefix(path, "dispute/"), 10, 64)
 		if err == nil {
 			if rec := kourt.GetRecord(id); rec != nil {
-				b.WriteString("| | |\n|---|---|\n| dispute | " + u(rec.Dispute) + " |\n| state | " + rec.State + " |\n| claim | " + u(rec.ClaimID) + " |\n| title | " + rec.Title + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + rec.Route + ") |\n| stake | " + cc(rec.Stake) + " CC |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
-				if rec.ClaimID != 0 && kv.Exists(kourt.CourtSlug) {
-					b.WriteString("| Kourt | " + kv.ClaimStatus(kourt.CourtSlug, rec.ClaimID) + " |\n")
+				b.WriteString("| | |\n|---|---|\n| dispute | [" + u(rec.Dispute) + "](" + disputeURL(rec.Dispute) + ") |\n| state | " + rec.State + " |\n| claim | " + claimLink(rec) + " |\n| title | " + rec.Title + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + rec.Route + ") |\n| stake | " + cc(rec.Stake) + " CC |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
+				if rec.ClaimID != 0 && rec.Binding == binding && kv.Exists(kourt.CourtSlug) {
+					b.WriteString("| Kourt says | " + kv.ClaimStatus(kourt.CourtSlug, rec.ClaimID) + " |\n")
 				}
 				return b.String()
 			}
 		}
-		return b.String() + "unknown record\n"
+		b.WriteString("_No mirror record at `" + path + "`; records live at `:dispute/<id>`, the court's own pages at [" + courtURL + "](" + courtURL + ")._\n\n")
 	}
 	b.WriteString("| dispute | state | claim | title |\n|---|---|---|---|\n")
+	n := 0
 	for id := uint64(1); id <= core.DisputeCount(); id++ {
 		rec := kourt.GetRecord(id)
 		if rec == nil {
 			continue
 		}
-		b.WriteString("| [" + u(id) + "](:dispute/" + u(id) + ") | " + rec.State + " | " + u(rec.ClaimID) + " | " + rec.Title + " |\n")
+		n++
+		b.WriteString("| [" + u(id) + "](:dispute/" + u(id) + ") | " + rec.State + " | " + claimLink(rec) + " | " + rec.Title + " |\n")
+	}
+	if n == 0 {
+		b.WriteString("\n_No records yet: a record appears when a resolved dispute is cranked._\n")
 	}
 	return b.String()
+}
+
+// courtURL is the court's page on gnoweb.
+const courtURL = "/r/g1leu8d2vsplhehcfkjg50mwgdpxdkt8tztu95wr/kourtv3:" + kourt.CourtSlug
+
+func disputeURL(id uint64) string { return "/r/clockwork/gnoracle/core:dispute/" + u(id) }
+
+// claimLink is the claim's page on the court, for records of this binding.
+func claimLink(rec *kourt.Record) string {
+	if rec.ClaimID == 0 {
+		return "none yet"
+	}
+	if rec.Binding != binding {
+		return u(rec.ClaimID) + " (" + rec.Binding + ")"
+	}
+	return "[" + u(rec.ClaimID) + "](" + courtURL + "/" + u(rec.ClaimID) + ")"
 }
 
 // cc formats micro court coin as a decimal.

@@ -203,7 +203,7 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 				return b.String()
 			}
 		}
-		return b.String() + "unknown record\n"
+		b.WriteString("_No mirror record at `" + path + "`; records live at `:dispute/<id>`._\n\n")
 	}
 	b.WriteString("| dispute | state | claim | title |\n|---|---|---|---|\n")
 	for id := uint64(1); id <= core.DisputeCount(); id++ {
