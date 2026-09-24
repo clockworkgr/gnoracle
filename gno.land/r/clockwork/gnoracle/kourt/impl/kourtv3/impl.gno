@@ -574,7 +574,7 @@ func (*implKourtV3) Render(_ int, rlm realm, path string) string {
 		id, err := strconv.ParseUint(strings.TrimPrefix(path, "dispute/"), 10, 64)
 		if err == nil {
 			if rec := kourt.GetRecord(id); rec != nil {
-				b.WriteString("| | |\n|---|---|\n| dispute | [" + u(rec.Dispute) + "](" + disputeURL(rec.Dispute) + ") |\n| state | " + rec.State + " |\n| claim | " + claimLink(rec) + " |\n| title | " + cell(rec.Title) + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + cell(rec.Route) + ") |\n| stake | " + cc(rec.Stake) + " CC |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
+				b.WriteString("| | |\n|---|---|\n| dispute | [" + u(rec.Dispute) + "](" + disputeURL(rec.Dispute) + ") |\n| state | " + rec.State + " |\n| claim | " + claimLink(rec) + " |\n| title | " + cell(rec.Title) + " |\n| verdict | " + verdictLabel(rec) + " |\n| stake | " + cc(rec.Stake) + " CC |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
 				if rec.ClaimID != 0 && rec.Binding == binding && kv.Exists(kourt.CourtSlug) {
 					b.WriteString("| Kourt says | " + cell(kv.ClaimStatus(kourt.CourtSlug, rec.ClaimID)) + " |\n")
 				}
@@ -718,4 +718,25 @@ func jsonRecord(rec *kourt.Record) *jsonw.Object {
 		o.Str("kourtStatus", kv.ClaimStatus(kourt.CourtSlug, rec.ClaimID)).Str("kourtTimeline", kv.ClaimTimeline(kourt.CourtSlug, rec.ClaimID))
 	}
 	return o
+}
+
+// verdictLabel names a record's verdict for the pages: YES agrees with the
+// DAO, NO is Kourt's dissent, none while pending or when closed undecided.
+func verdictLabel(rec *kourt.Record) string {
+	switch rec.State {
+	case kourt.StateSettled, kourt.StateConfirmed, kourt.StateDissent, kourt.StateAbandoned:
+	default:
+		return "pending"
+	}
+	v := "none"
+	switch rec.Verdict {
+	case 0:
+		v = "YES"
+	case 1:
+		v = "NO"
+	}
+	if rec.Route != "" {
+		v += " (" + cell(rec.Route) + ")"
+	}
+	return v
 }

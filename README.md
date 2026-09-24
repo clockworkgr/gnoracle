@@ -176,7 +176,8 @@ The script prints the address of each page as it comes to life (gnoweb on
 `http://127.0.0.1:38888`): the feed and its rounds, the example consumer
 realm with every value it read and the block height it read it at, the
 dispute with its tally, the DAO members, and the DAO's court on Kourt with
-the settled claim. `docs/DEMO.md` explains each step and which clocks the
+the settled claim. `docs/DEMO_WALKTHROUGH.md` tours every page it leaves on gnoweb;
+`docs/DEMO.md` explains each step and which clocks the
 demo shortens (only on a development chain; production values are untouched).
 
 ## Status

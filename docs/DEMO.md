@@ -29,10 +29,11 @@ toolchain` first (`GNODEV=` points it at another binary).
 | Keys | three provider keys, two member keys, a challenger, a bot key and a poller key are created in `.dev-keys/` and funded | |
 | Members | `test1`, `voter1` and `voter2` each stake 100,000 PYTH; their weight counts from the next epoch (ten blocks on a `dev` chain) | `dao:members` |
 | Feed | `DEMO/USD` (one-minute rounds) is proposed and activated; the three providers register 1,000 GNOT each; the reader realm is subscribed for one period (10 GNOT) | `core:feed/1`, `core:feed/1/subscribers` |
-| Live phase | three agents (http and exec adapters) submit every round, the bot announces finalisations and cranks the Kourt mirror every 2 minutes, and the reader realm polls the feed every 20 s, keeping each value with its block height | `core:feed/1/rounds`, `demo/reader`, `.dev-agent/demo/bot.log` |
+| Live phase | the "market" price starts at 1.001200 and takes a small random step every 15 s; three agents submit every round (two fetch the price over HTTP, the third reads it with its own 0.05% error), the bot announces finalisations and cranks the Kourt mirror every 2 minutes, and the reader realm polls the feed every 20 s, keeping each value with its block height | `core:feed/1/rounds`, `demo/reader`, `.dev-agent/demo/bot.log` |
 | Dispute | the challenger contests the round the reader last read, proposing a value 5% higher (minor tier, 2,500 GNOT bond); the ballot opens | `core:dispute/1` |
 | Ballot | the three members commit `UPHOLD`, reveal when the phase turns, the ballot is counted, the appeal window passes, the dispute resolves: the challenger forfeits the bond | `core:dispute/1`, `dao:member/<address>` |
 | Kourt | the mirror founds court `gnoracle` on the Kourt v3 realm, `test1` buys court coin for 10 GNOT and moves 20 CC into the mirror's float, the verdict is filed as claim 1, staked, answered and settled | `kourtv3:gnoracle`, `kourtv3:gnoracle/1`, `kourt:dispute/1` |
+| Settlement | the core forwards its fee pool to the DAO, the DAO books it, and the three members settle the ballot, so their pages show claimable fees and dispute rewards | `dao:member/<address>`, `dao:health` |
 
 Afterwards the agents keep producing rounds and the reader keeps reading, so
 the feed and reader pages grow while you browse. The bot posts to its log
@@ -69,6 +70,8 @@ answer follows about three hours of blocks
 and the settlement 72 hours later. `RESET=1` gives a clean chain.
 
 ## Reading the pages
+
+[DEMO_WALKTHROUGH.md](DEMO_WALKTHROUGH.md) walks through every page the demo leaves on gnoweb, with the numbers from a real run. In short:
 
 - **`core:feed/1`** shows the feed, its providers and the latest value;
   `core:feed/1/rounds` every round with who submitted what.

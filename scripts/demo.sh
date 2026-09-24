@@ -147,6 +147,16 @@ poll_loop() { # poll <feed> <every>: the reader realm reads the feed on a schedu
   done
 }
 
+price_walk() { # price <file> <every>: the "market" price moves by a small random step
+  local file="$1" every="$2"
+  while :; do
+    awk -v seed="$RANDOM$$" 'BEGIN { srand(seed) } { if (match($0, /"amount":"[0-9.]+"/)) { p = substr($0, RSTART + 10, RLENGTH - 11) + 0 } }
+      END { p = p * (1 + (rand() - 0.5) * 0.006); if (p < 0.9) p = 0.9; if (p > 1.1) p = 1.1
+            printf "{\"data\":{\"base\":\"GNOT\",\"currency\":\"USD\",\"amount\":\"%.6f\"}}\n", p }' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    sleep "$every"
+  done
+}
+
 stop_all() {
   [ -f "$OUT/pids" ] || { echo "demo: nothing recorded in $OUT/pids"; return 0; }
   local kept=()
@@ -246,6 +256,7 @@ dev_clocks() {
   lower_param dao revealPeriod 60        # 24 h
   lower_param core appealWindow 30       # 24 h
   lower_param core providerMinStakeFloor 1000000000   # 10,000 GNOT
+  [ "$(qeval "$CORE.ParamStr(\"kourtRealm\")")" = "(\"$KOURT\" string)" ] || KEY=test1 callq "$CORE" SetParamStr kourtRealm "$KOURT" || fail "kourtRealm"
 }
 
 keys_and_funding() {
@@ -300,14 +311,20 @@ create_feed() {
 write_configs() {
   # a new feed: journals and agent state from earlier runs would skew the counts
   rm -f "$OUT"/*-journal.jsonl "$OUT"/*-state.json "$OUT/bot-state.json"
-  echo '{"data":{"base":"GNOT","currency":"USD","amount":"1.0012"}}' > "$OUT/www/price.json"
+  echo '{"data":{"base":"GNOT","currency":"USD","amount":"1.001200"}}' > "$OUT/www/price.json"
+  # the exec provider reads the same market price with its own small error (up to 0.05%)
+  cat > "$OUT/exec-price.sh" <<'SH'
+#!/bin/sh
+awk -v seed="$$" 'BEGIN { srand(seed + srand()) } { if (match($0, /"amount":"[0-9.]+"/)) { p = substr($0, RSTART + 10, RLENGTH - 11) + 0 } } END { printf "%.6f\n", p * (1 + (rand() - 0.5) * 0.001) }' "$(dirname "$0")/www/price.json"
+SH
+  chmod +x "$OUT/exec-price.sh"
   local i=0 name src
   for name in "${PROVIDERS[@]}"; do
     i=$((i + 1))
     if [ $((i % 2)) -eq 1 ]; then
       src=$'adapter = "http"\nurls = ["http://127.0.0.1:'"$PRICE_PORT"$'/price.json"]\npath = "data.amount"'
     else
-      src=$'adapter = "exec"\ncommand = ["sh", "-c", "awk \'BEGIN { srand(); printf \\"1.00%02d\\\\n\\", int(rand() * 40) }\'"]'
+      src=$'adapter = "exec"\ncommand = ["'"$OUT/exec-price.sh"$'"]'
     fi
     cat > "$OUT/$name.toml" <<CFG
 remote = "$REMOTE"
@@ -336,6 +353,7 @@ start_workers() {
   step "starting three agents, the bot and the reader's poller (they keep running after the demo)"
   if lsof -nP -iTCP:"$PRICE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then fail "port $PRICE_PORT is in use; set PRICE_PORT"; fi
   detach price-server "$OUT/www.log" python3 -m http.server "$PRICE_PORT" --bind 127.0.0.1 --directory "$OUT/www"
+  detach price-walk "$OUT/price-walk.log" bash "$here/scripts/demo.sh" price "$OUT/www/price.json" 15
   sleep 1
   local name
   for name in "${PROVIDERS[@]}"; do
@@ -343,6 +361,7 @@ start_workers() {
   done
   detach bot "$OUT/bot.log" bin/gnoracle-bot -config "$OUT/bot.toml"
   detach reader-poller "$OUT/reader-poll.log" bash "$here/scripts/demo.sh" poll "$FEED" "$READ_EVERY"
+  say "the \"market\" price starts at 1.001200 and takes a small random step every 15 s (http providers read it; the exec provider reads it with its own 0.05% error)"
   say "agents ${PROVIDERS[*]} (http and exec adapters), bot $BOTKEY, reader polls every ${READ_EVERY}s as $READERKEY"
   say "watch the rounds arrive on the feed page and the readings on the reader realm's page (links above)"
 }
@@ -484,6 +503,20 @@ mirror_to_kourt() {
   fi
 }
 
+settle_and_fees() {
+  step "settlement: the core forwards its fee pool to the DAO, the DAO books it, the members settle the ballot"
+  KEY=test1 callq "$CORE" ForwardFees || fail "ForwardFees"
+  KEY=test1 callq "$DAO" SyncFees || fail "SyncFees"
+  local v addr
+  for v in "${VOTERS[@]}"; do
+    addr="$(addr_of "$v")"
+    KEY=test1 callq "$DAO" SettleMember "$addr" 0 || fail "SettleMember $v"
+  done
+  "${CLI[@]}" -raw member "$(addr_of voter1)" > "$OUT/member-voter1.json"
+  jq_ 'print("   voter1: ballots settled", d.get("cursor"), "- fees claimable", d.get("feesOwed", d.get("fees")), "ugnot - dispute rewards", d.get("pendingUgnot"), "ugnot,", d.get("pendingPyth"), "PYTH")' < "$OUT/member-voter1.json" || true
+  link "a member's page" "$WEBURL/r/clockwork/gnoracle/dao:member/$(addr_of voter1)"
+}
+
 links() {
   step "inspect on gnoweb $WEBURL (everything is still running; make demo-stop ends what the demo started)"
   cat <<LINKS | tee "$OUT/links.txt"
@@ -516,6 +549,7 @@ main() {
   open_dispute
   vote
   mirror_to_kourt
+  settle_and_fees
   links
   echo
   echo "demo: done in $((SECONDS / 60)) min $((SECONDS % 60)) s"
@@ -523,6 +557,7 @@ main() {
 
 case "${1:-}" in
   poll) poll_loop "$2" "$3" ;;
+  price) price_walk "$2" "$3" ;;
   stop) stop_all ;;
   "") main ;;
   *) echo "usage: $0 [poll <feed> <every> | stop]" >&2; exit 2 ;;

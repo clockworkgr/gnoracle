@@ -223,7 +223,7 @@ func (*implV1) Render(_ int, rlm realm, path string) string {
 		id, err := strconv.ParseUint(strings.TrimPrefix(path, "dispute/"), 10, 64)
 		if err == nil {
 			if rec := kourt.GetRecord(id); rec != nil {
-				b.WriteString("| | |\n|---|---|\n| dispute | " + u(rec.Dispute) + " |\n| state | " + rec.State + " |\n| claim | " + u(rec.ClaimID) + " |\n| title | " + cell(rec.Title) + " |\n| verdict | " + strconv.Itoa(rec.Verdict) + " (" + cell(rec.Route) + ") |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
+				b.WriteString("| | |\n|---|---|\n| dispute | " + u(rec.Dispute) + " |\n| state | " + rec.State + " |\n| claim | " + u(rec.ClaimID) + " |\n| title | " + cell(rec.Title) + " |\n| verdict | " + verdictLabel(rec) + " |\n| steps | " + strconv.FormatInt(rec.Steps, 10) + " |\n")
 				return b.String()
 			}
 		}
@@ -324,4 +324,25 @@ func jsonRecord(rec *kourt.Record) *jsonw.Object {
 func (*implV1) Invoke(_ int, rlm realm, caller address, method, args string) string {
 	kourt.Store(0, rlm)
 	panic("kourt: unknown method " + method)
+}
+
+// verdictLabel names a record's verdict for the pages: YES agrees with the
+// DAO, NO is Kourt's dissent, none while pending or when closed undecided.
+func verdictLabel(rec *kourt.Record) string {
+	switch rec.State {
+	case kourt.StateSettled, kourt.StateConfirmed, kourt.StateDissent, kourt.StateAbandoned:
+	default:
+		return "pending"
+	}
+	v := "none"
+	switch rec.Verdict {
+	case 0:
+		v = "YES"
+	case 1:
+		v = "NO"
+	}
+	if rec.Route != "" {
+		v += " (" + cell(rec.Route) + ")"
+	}
+	return v
 }

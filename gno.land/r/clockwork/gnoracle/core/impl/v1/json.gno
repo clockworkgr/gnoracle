@@ -328,7 +328,7 @@ func jsonDispute(d *core.DisputeRecord) *jsonw.Object {
 
 func renderDisputes() string {
 	total := core.DisputeCount()
-	out := "# Disputes\n\n" + u(total) + " so far. Ballots run on the [DAO](" + webPath(core.DAOPath) + "); verdicts are mirrored to [Kourt](" + webPath(core.ParamStr("kourtRealm")) + ").\n\n| id | feed | round | status | outcome | opened |\n|---|---|---|---|---|---|\n"
+	out := "# Disputes\n\n" + u(total) + " so far. Ballots run on the [DAO](" + webPath(core.DAOPath) + "); verdicts are mirrored to [Kourt](" + webPath(kourtPath()) + ").\n\n| id | feed | round | status | outcome | opened |\n|---|---|---|---|---|---|\n"
 	shown := 0
 	for id := total; id >= 1 && shown < 50; id-- {
 		d := core.GetDispute(id)
@@ -356,7 +356,11 @@ func renderDispute(id uint64) string {
 	}
 	out += "| opened | " + i(d.OpenedAt) + " |\n| ballot round | " + i(d.BallotRound) + " |\n"
 	if d.Outcome != "" {
-		out += "| outcome | " + d.Outcome + " / " + d.TierDecided + " |\n| decided | " + i(d.DecidedAt) + " |\n"
+		outcome := d.Outcome
+		if d.TierDecided != "" {
+			outcome += " (" + d.TierDecided + " tier)"
+		}
+		out += "| outcome | " + outcome + " |\n| decided | " + i(d.DecidedAt) + " |\n"
 	}
 	if d.Status == core.DisputeDecided {
 		out += "| appeal window ends | " + i(d.DecidedAt+param("appealWindow")) + " |\n"
@@ -368,10 +372,19 @@ func renderDispute(id uint64) string {
 		out += "| resolved | " + i(d.ResolvedAt) + " |\n| slashed | " + i(d.Slashed) + " ugnot |\n"
 	}
 	out += "| evidence hash | `" + d.EvidenceHash + "` |\n\n"
-	out += "Ballot: [DAO dispute " + u(id) + "](" + webPath(core.DAOPath) + ":json/ballot/dispute/" + u(id) + ") · Court of record: [Kourt mirror](" + webPath(core.ParamStr("kourtRealm")) + ":dispute/" + u(id) + ")\n\n"
+	out += "Ballot: [DAO dispute " + u(id) + "](" + webPath(core.DAOPath) + ":json/ballot/dispute/" + u(id) + ") · Court of record: [Kourt mirror](" + webPath(kourtPath()) + ":dispute/" + u(id) + ")\n\n"
 	out += "## Evidence\n\n" + esc(d.Evidence) + "\n"
 	return out
 }
 
 // webPath turns a package path into a gnoweb link.
 func webPath(pkgPath string) string { return strings.TrimPrefix(pkgPath, "gno.land") }
+
+// kourtPath is the Kourt mirror realm: the kourtRealm parameter when set,
+// otherwise the kourt realm deployed beside the core.
+func kourtPath() string {
+	if p := core.ParamStr("kourtRealm"); p != "" {
+		return p
+	}
+	return strings.TrimSuffix(core.SelfPath(), "/core") + "/kourt"
+}
