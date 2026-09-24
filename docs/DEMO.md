@@ -80,6 +80,14 @@ and the settlement 72 hours later. `RESET=1` gives a clean chain.
   **`kourt:dispute/1`** is the mirror's own record of the same steps.
 - **`core:health`** and **`dao:health`** are the conservation checks; both
   read `ok` throughout.
+- **Calling from the pages.** Each realm page lists its functions. Views
+  without a `cur realm` parameter (`Last()`, `Count()`) run in the browser
+  against the node; anything that changes state (`Poll`, `Submit`, a
+  dispute) is a transaction, so the page shows the `gnokey` command to run
+  from a terminal with the dev keybase, and the `gnoracle` CLI does the
+  same: `bin/gnoracle -remote http://127.0.0.1:36657 -chain dev -ns clockwork
+  -key-home .dev-keys -key test1 call gno.land/r/clockwork/gnoracle/demo/reader Poll 1`
+  (password `devpassword`).
 
 ## If something is off
 
