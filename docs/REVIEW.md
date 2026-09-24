@@ -116,5 +116,13 @@ staking).
   for the licence holder before M6.
 - **Sponsor overpayment** above `periods x subscriptionPrice` joins the pool
   rather than being refunded; documented.
+- **Development-chain floors.** Added for `make demo` (2026-09-24): on a
+  chain whose id is `dev` the floors of `appealWindow`, the ballot phases,
+  `epochBlocks`, `upgradeTimelock` and `executionWindow` are lower, and the
+  DAO exposes `DevSetParam`, which refuses on any other chain id. The
+  defaults are untouched everywhere and the gate is one function per realm
+  (`devFloor`); an auditor should confirm the gate reads the chain id and
+  nothing else. The test harness runs realm calls under an empty chain id,
+  so the suites exercise the production floors.
 - **Weights for penalties** use the smaller of the sealed and the live stake;
   unchanged and documented in the plan.

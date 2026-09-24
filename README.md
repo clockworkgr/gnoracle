@@ -147,6 +147,24 @@ image):
   as a provider to casting a sealed vote (it keeps the secret needed to
   reveal it).
 
+## Try it in seven minutes
+
+With Go and Python installed, three commands run the whole story on a chain
+on your machine and leave it up for you to browse:
+
+```sh
+make toolchain deps go-build   # once
+make demo                      # a local chain with gnoweb, three agents, a reader realm, a dispute, the ballot, the Kourt claim
+make demo-stop                 # when you are done
+```
+
+The script prints the address of each page as it comes to life (gnoweb on
+`http://127.0.0.1:38888`): the feed and its rounds, the example consumer
+realm with every value it read and the block height it read it at, the
+dispute with its tally, the DAO members, and the DAO's court on Kourt with
+the settled claim. `docs/DEMO.md` explains each step and which clocks the
+demo shortens (only on a development chain; production values are untouched).
+
 ## Status
 
 The realms and the tools are complete and tested against a local chain,

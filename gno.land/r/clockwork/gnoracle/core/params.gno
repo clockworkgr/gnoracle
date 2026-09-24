@@ -1,6 +1,7 @@
 package core
 
 import (
+	"chain/runtime"
 	"strconv"
 
 	"gno.land/p/clockwork/gnoracle/params/v0"
@@ -9,6 +10,19 @@ import (
 // registry holds the DAO-tunable numbers of the core (plan Appendix C).
 // Amounts are ugnot, durations seconds, rates basis points.
 var registry = params.New()
+
+// devChain is true on a development chain (chain id "dev": gnodev and the
+// test harness), where waiting a day for a window is not an option. It
+// relaxes only the floors of a few timing parameters; the defaults, and
+// every bound on any other chain, are what the plan says.
+var devChain = runtime.ChainID() == "dev"
+
+func devFloor(prod, dev int64) int64 {
+	if devChain {
+		return dev
+	}
+	return prod
+}
 
 func defineParams() {
 	r := registry
@@ -54,7 +68,7 @@ func defineParams() {
 	def("minDisputeBond", "smallest dispute bond", 2500*gnot, 100*gnot, 100_000*gnot, 5000)
 	def("disputeBondBps", "dispute bond as a share of the feed's active stake", 1000, 100, 10_000, 5000)
 	def("disputeEscalationWindow", "seconds within which repeat disputes on a feed double the bond", 7*24*3600, 24*3600, 90*24*3600, 5000)
-	def("appealWindow", "seconds after a decided round in which an appeal may be posted", 24*3600, 3600, 7*24*3600, 5000)
+	def("appealWindow", "seconds after a decided round in which an appeal may be posted", 24*3600, devFloor(3600, 10), 7*24*3600, 5000)
 	def("appealBondMultiple", "appeal bond as a multiple of the dispute bond", 2, 1, 10, 5000)
 	def("appealConsumeBps", "share of a losing appeal bond consumed", 2500, 0, 10_000, 5000)
 	def("voidConsumeBps", "share of the bond consumed on a void outcome", 500, 0, 2000, 5000)

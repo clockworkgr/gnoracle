@@ -1,6 +1,8 @@
 package dao
 
 import (
+	"chain/runtime"
+
 	"gno.land/p/clockwork/gnoracle/params/v0"
 )
 
@@ -8,6 +10,20 @@ import (
 // PYTH amounts are base units (6 decimals), durations seconds, rates basis
 // points.
 var registry = params.New()
+
+// devChain is true on a development chain (chain id "dev": gnodev and the
+// test harness), where waiting a day for a ballot is not an option. It
+// relaxes only the floors of the timing parameters below, which DevSetParam
+// may then lower; the defaults, and every bound on any other chain, are what
+// the plan says.
+var devChain = runtime.ChainID() == "dev"
+
+func devFloor(prod, dev int64) int64 {
+	if devChain {
+		return dev
+	}
+	return prod
+}
 
 func defineParams() {
 	r := registry
@@ -17,7 +33,7 @@ func defineParams() {
 	pyth := int64(1_000_000)
 	gnot := int64(1_000_000)
 	// membership
-	def("epochBlocks", "blocks per voting-weight epoch", 720, 720, 720, 0)
+	def("epochBlocks", "blocks per voting-weight epoch", 720, devFloor(720, 10), 720, devFloor(0, 5000))
 	def("unstakeCooldown", "seconds between RequestUnstake and Withdraw", 7*24*3600, 3*24*3600, 60*24*3600, 5000)
 	def("settleMaxN", "resolved disputes processed per member per settle", 20, 1, 200, 5000)
 	def("settleTipBps", "share of settled penalties paid to whoever runs SettleMember", 50, 0, 1000, 5000)
@@ -33,18 +49,18 @@ func defineParams() {
 	def("decisionBps", "round-1 share of the two sides a side needs", 6000, 5001, 10_000, 5000)
 	def("disputeQuorumBps2", "round-2 quorum", 2500, 500, 10_000, 5000)
 	def("decisionBps2", "round-2 decision bar", 5500, 5001, 10_000, 5000)
-	def("commitPeriod", "round-1 commit phase", 24*3600, 6*3600, 14*24*3600, 5000)
-	def("revealPeriod", "round-1 reveal phase", 24*3600, 6*3600, 14*24*3600, 5000)
-	def("commitPeriod2", "round-2 commit phase", 48*3600, 6*3600, 14*24*3600, 5000)
-	def("revealPeriod2", "round-2 reveal phase", 24*3600, 6*3600, 14*24*3600, 5000)
+	def("commitPeriod", "round-1 commit phase", 24*3600, devFloor(6*3600, 30), 14*24*3600, 5000)
+	def("revealPeriod", "round-1 reveal phase", 24*3600, devFloor(6*3600, 30), 14*24*3600, 5000)
+	def("commitPeriod2", "round-2 commit phase", 48*3600, devFloor(6*3600, 30), 14*24*3600, 5000)
+	def("revealPeriod2", "round-2 reveal phase", 24*3600, devFloor(6*3600, 30), 14*24*3600, 5000)
 	// governance
 	def("proposeBps", "share of staked supply a proposer must hold to skip the deposit", 25, 0, 1000, 5000)
 	def("proposalDeposit", "deposit for a proposer below proposeBps, refunded on quorum", 20*gnot, 0, 1000*gnot, 5000)
 	def("maxActiveProposals", "live proposals at once", 32, 8, 128, 5000)
-	def("executionWindow", "seconds after the timelock in which a passed proposal may execute", 7*24*3600, 24*3600, 90*24*3600, 5000)
+	def("executionWindow", "seconds after the timelock in which a passed proposal may execute", 7*24*3600, devFloor(24*3600, 60), 90*24*3600, 5000)
 	def("minStake", "smallest stake that makes a member", 1*pyth, 1, 1_000_000*pyth, 5000)
 	def("maxMintPerYearBps", "largest mint per 365 days as a share of supply", 200, 0, 1000, 5000)
-	def("upgradeTimelock", "timelock of upgrade-accept proposals", 7*24*3600, 24*3600, 30*24*3600, 5000)
+	def("upgradeTimelock", "timelock of upgrade-accept proposals", 7*24*3600, devFloor(24*3600, 30), 30*24*3600, 5000)
 	def("guardianHandoverMembers", "staked members at which the guardian hands authority over", 25, 1, 1000, 5000)
 	r.DefineString("kourtRealm", "package path of the Kourt adapter realm", "")
 }

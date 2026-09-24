@@ -127,9 +127,13 @@ the seven-day delay has passed, since its own execution window is limited.
    with `ONLY="r/clockwork/gnoracle/core/impl/v2" make deploy ...`; its `init`
    proposes it. The `:releases` page (or `vm/qeval '<permanent>.PendingPaths()'`)
    shows it as pending.
-2. Rehearse on gnodev first: `make dev`, deploy, `Accept`, run `make chain-test`
-   and an agent against it, then `Rollback` and check the state is intact
-   (the permanent realm holds all state; an implementation holds none).
+2. Rehearse on gnodev first: `make demo` gives a populated chain in a few
+   minutes (feed, providers, a reader realm, a resolved dispute, a settled
+   Kourt claim; `docs/DEMO.md`); deploy the release to it, `Accept`, run
+   `make chain-test` and an agent against it, then `Rollback` and check the
+   state is intact (the permanent realm holds all state; an implementation
+   holds none). On a development chain `upgradeTimelock` may be lowered to
+   30 s with `DevSetParam` (§9).
 3. Activate: before handover `gnoracle call <permanent> Accept <path>`; after
    handover a DAO proposal of kind `upgrade-accept` with payload `core <path>`,
    `dao <path>` or `kourt <path>` (7-day timelock, `upgradeTimelock`), executed
@@ -295,6 +299,16 @@ parameter per block, and after handover goes through a `param` proposal
 (`core.<name>=<value>` or `dao.<name>=<value>`; strings as
 `core.<name>=str:<text>`). Appendix C of the plan is generated from the
 registries (`scripts/gen-appendices.py`).
+
+**Development chains.** On a chain whose id is `dev` (gnodev; no public
+network) a few timing floors are lower so that `make demo` and upgrade
+rehearsals fit in minutes: `appealWindow` down to 10 s on the core;
+`commitPeriod`, `revealPeriod` and their round-2 variants down to 30 s,
+`epochBlocks` down to 10 (fixed at 720 elsewhere), `upgradeTimelock` to
+30 s and `executionWindow` to 60 s on the DAO. The DAO's own parameters
+change there with `DevSetParam <name> <value>` (authority; still rate
+limited), an entry point that refuses on every other chain id. Defaults are
+identical on every chain; Appendix C lists the relaxed bounds.
 
 ## 10. Backups and records
 

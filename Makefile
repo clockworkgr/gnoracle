@@ -25,7 +25,7 @@ export NS
 
 PKGS := ./gno.land/...
 
-.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim agent-soak
+.PHONY: help toolchain deps test test-p test-r lint fmt dev dev-keys chain-test build deploy clean go-build go-test agent-dev bot-dev docker sim agent-soak demo demo-stop
 
 help: ## this list
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | awk -F ":.*## " "{ printf \"  %-10s %s\\n\", \$$1, \$$2 }"
@@ -70,7 +70,7 @@ fmt: toolchain ## gno fmt, in place
 # the stock ports can coexist; run `make dev RPC=36657 WEB=38888` to match them.
 RPC ?= 26657
 WEB ?= 8888
-DEV_PATHS ?= gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/core/impl/v2,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/impl/v2,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1,gno.land/r/clockwork/gnoracle/kourt/impl/kourtv3
+DEV_PATHS ?= gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/core/impl/v2,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/impl/v2,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1,gno.land/r/clockwork/gnoracle/kourt/impl/kourtv3,gno.land/r/clockwork/gnoracle/demo/reader
 
 dev: toolchain deps ## local chain + gnoweb (RPC=36657 WEB=38888 matches the dev configs); do not edit the tree while it runs
 	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -paths $(DEV_PATHS) -web-home /r/clockwork/gnoracle/core .
@@ -103,6 +103,12 @@ bot-dev: go-build ## run the bot against the local chain, messages to the log
 
 agent-soak: ## run several agents and the bot against the local chain for a few minutes and assert (needs chain-test first)
 	@./scripts/agent-soak.sh
+
+demo: ## the whole story on a local chain in a few minutes: feed, agents, a reader realm, a dispute, the DAO ballot, the Kourt claim (RESET=1 to start clean)
+	@$(if $(filter command line,$(origin RPC)),RPC=$(RPC)) $(if $(filter command line,$(origin WEB)),WEB=$(WEB)) ./scripts/demo.sh
+
+demo-stop: ## stop the agents, bot and pollers the demo left running (KEEP_CHAIN=1 leaves a chain the demo started)
+	@./scripts/demo.sh stop
 
 docker: ## build the gnoracle image with the three tools
 	docker build -t gnoracle .

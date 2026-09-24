@@ -15,6 +15,7 @@
 package dao
 
 import (
+	"chain/runtime"
 	"chain/runtime/unsafe"
 	"strconv"
 	"strings"
@@ -236,6 +237,22 @@ func Freeze(cur realm) {
 	}
 	proxy.Freeze(0, cur)
 	emit("Frozen", "realm", "dao")
+}
+
+// DevSetParam changes one of the DAO's own parameters directly, within its
+// bounds and rate limit. Development chains only (chain id "dev"): on any
+// other chain the DAO's parameters change by `param` proposal alone and this
+// entry point refuses, whoever calls it. Authority only.
+func DevSetParam(cur realm, name string, value int64) {
+	if id := runtime.ChainID(); id != "dev" {
+		panic("dao: parameters change by proposal; DevSetParam works on development chains only (this chain is " + strconv.Quote(id) + ")")
+	}
+	proxy.AssertAuthorized(0, cur)
+	old, err := registry.SetAt(name, value, runtime.ChainHeight())
+	if err != nil {
+		panic(err.Error())
+	}
+	emit("ParamChanged", "name", name, "old", strconv.FormatInt(old, 10), "new", strconv.FormatInt(value, 10))
 }
 
 // AuthorityTimelock is the delay between proposing and executing a transfer

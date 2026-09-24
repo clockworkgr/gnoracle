@@ -100,17 +100,34 @@ def events(dirpaths):
     return found
 
 
+DEV_FLOOR = re.compile(r'devFloor\(([^,()]+), ([^()]+)\)')
+DEV_LABEL = {2: "default", 3: "min", 4: "max", 5: "change"}
+
+
 def params(dirpath):
-    rows = []
+    """Rows of (name, doc, default, min, max, change) with the production
+    values, plus a dict name -> [(field, dev value)] for the bounds that a
+    development chain (chain id "dev") relaxes through devFloor(prod, dev)."""
+    rows, dev = [], {}
+    ev = lambda e: eval(e.replace("_", ""), {"__builtins__": {}}, UNITS)
     for f, text in sources(dirpath):
-        for m in re.finditer(r'def\("(\w+)", "([^"]*)", ([^,]+), ([^,]+), ([^,]+), (\d+)\)', text):
-            name, doc, dflt, lo, hi, chg = m.groups()
-            ev = lambda e: eval(e.replace("_", ""), {"__builtins__": {}}, UNITS)
-            rows.append((name, doc, ev(dflt), ev(lo), ev(hi), int(chg)))
+        for m in re.finditer(r'def\("(\w+)", "([^"]*)", (.+)\)\s*(?:#.*)?$', text, re.M):
+            name, doc, rest = m.groups()
+            args = [a.strip() for a in split_args(rest)]
+            if len(args) != 4:
+                continue
+            vals = []
+            for i, a in enumerate(args, start=2):
+                dm = DEV_FLOOR.fullmatch(a)
+                if dm:
+                    dev.setdefault(name, []).append((DEV_LABEL[i], ev(dm.group(2))))
+                    a = dm.group(1)
+                vals.append(ev(a))
+            rows.append((name, doc, vals[0], vals[1], vals[2], int(vals[3])))
         for m in re.finditer(r'DefineString\("(\w+)", "([^"]*)", ([^)]+)\)', text):
             name, doc, dflt = m.groups()
             rows.append((name, doc, dflt.strip(), "", "", "text"))
-    return rows
+    return rows, dev
 
 
 def human(v):
@@ -161,8 +178,14 @@ def build():
                "block height. Amounts are ugnot (PYTH base units on the DAO), times are seconds.\n\n")
     for short, d in [("core", REALMS[0][1]), ("dao", REALMS[1][1])]:
         out.append(f"### `{d}`\n\n| name | default | min | max | change | what |\n|---|---|---|---|---|---|\n")
-        for name, doc, dflt, lo, hi, chg in params(d):
+        rows, dev = params(d)
+        for name, doc, dflt, lo, hi, chg in rows:
             out.append(f"| `{name}` | {human(dflt)} | {human(lo)} | {human(hi)} | {chg} | {doc} |\n")
+        if dev:
+            notes = "; ".join(f"`{name}` " + ", ".join(f"{field} {human(v)}" for field, v in fields) for name, fields in dev.items())
+            out.append("\nOn a development chain (chain id `dev`: gnodev) these bounds are relaxed so `make demo` can run "
+                       f"in minutes (`docs/DEMO.md`): {notes}. The defaults are the same everywhere; on the DAO the "
+                       "relaxed values are set with `DevSetParam`, which refuses on any other chain.\n")
         out.append("\n")
     return "".join(out)
 

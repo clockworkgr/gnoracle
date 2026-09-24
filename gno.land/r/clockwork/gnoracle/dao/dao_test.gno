@@ -497,3 +497,21 @@ func TestGates(cur realm, t *testing.T) {
 	uassert.AbortsContains(t, cur, "not the authority", func() { dao.Accept(cross(cur), daoImplPath) })
 	uassert.AbortsContains(t, cur, "not a member", func() { dao.ClaimFees(cross(cur)) })
 }
+
+// TestDevSetParamIsInertOffDevChains: DevSetParam and the relaxed timing
+// floors exist for chain id "dev" (gnodev), which `make demo` exercises. The
+// harness runs realm calls under an empty chain id, so here the entry point
+// refuses everyone, authority included, and the production floors hold.
+func TestDevSetParamIsInertOffDevChains(cur realm, t *testing.T) {
+	install(cur)
+	before := dao.Param("commitPeriod")
+	uassert.Equal(t, int64(24*3600), before)
+	testing.SetRealm(testing.NewUserRealm(admin))
+	nosend()
+	uassert.AbortsContains(t, cur, "development chains only", func() { dao.DevSetParam(cross(cur), "commitPeriod", before/2) })
+	testing.SetRealm(testing.NewUserRealm(alice))
+	nosend()
+	uassert.AbortsContains(t, cur, "development chains only", func() { dao.DevSetParam(cross(cur), "commitPeriod", before/2) })
+	uassert.Equal(t, before, dao.Param("commitPeriod"))
+	uassert.Equal(t, int64(720), dao.Param("epochBlocks"))
+}

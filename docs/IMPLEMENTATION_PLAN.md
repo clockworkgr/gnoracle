@@ -1062,7 +1062,7 @@ text through `sanitize.InlineText`.
 | Filetests | events for every entry point; `// Storage:` and `// Gas:` pins for §11 | `*_filetest.gno`, golden files updated only with a reviewed diff |
 | Adversarial | stale `cur`, `maketx run` payments refused, non-canonical teller refused, reentrant proposal execution refused, a panicking Kourt callee does not block resolution, oversized spec and evidence refused, overflow attempts, an implementation trying to keep a `StateRef` across calls, an implementation calling a mutator that would break conservation | `adversarial_test.gno` per realm |
 | Economic simulation | `docs/SIMULATION.md` (`go run ./sim`): deterministic break-even tables for provider gas by cadence, subscription prices, fee routing, miss penalties, voter exposure and dispute bonds; the stochastic run with honest, flaky, colluding and copycat providers and lazy, coherent, abstaining and bribed voters moves to the pearl-1 soak; sweeps the parameter table | `sim/` in Go, results in `docs/SIMULATION.md` |
-| Integration | gnodev with three agents, one consumer realm, the bot in dry-run; a dispute end to end with the Kourt mirror against a local copy of `r/kourtv3` | `make chain-test` |
+| Integration | gnodev with three agents, one consumer realm, the bot in dry-run; a dispute end to end with the Kourt mirror against a local copy of `r/kourtv3` | `make chain-test` (feed lifecycle), `make agent-soak` (agents and bot with assertions), `make demo` (the whole story including the reader realm `demo/reader`, a resolved dispute and a settled Kourt claim, in about seven minutes; `docs/DEMO.md`) |
 | Testnet soak | 4 weeks on `pearl-1` with at least 5 external providers, 2 feeds, at least 3 real disputes including one appeal, one live upgrade and one rollback | `docs/OPERATIONS.md` runbook |
 | Review | external audit of the permanent realms, `impl/v1` and `p/ledger`; a mutation run like Kourt's on the money paths | before mainnet |
 
@@ -1255,6 +1255,7 @@ func Rollback(cur realm)
 func WithdrawImpl(cur realm, pkgPath string)
 func Forget(cur realm)
 func Freeze(cur realm)
+func DevSetParam(cur realm, name string, value int64)
 func ProposeAuthority(cur realm, spec string) int64
 func ExecuteAuthority(cur realm)
 func CancelAuthority(cur realm)
@@ -1498,6 +1499,8 @@ Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 5
 | `forfeitSplitVotersBps` | 3,000 | 0 | 10,000 | 5000 | share of forfeitures to coherent voters |
 | `kourtRealm` | "" |  |  | text | package path of the Kourt adapter realm |
 
+On a development chain (chain id `dev`: gnodev) these bounds are relaxed so `make demo` can run in minutes (`docs/DEMO.md`): `appealWindow` min 10. The defaults are the same everywhere; on the DAO the relaxed values are set with `DevSetParam`, which refuses on any other chain.
+
 ### `gno.land/r/clockwork/gnoracle/dao`
 
 | name | default | min | max | change | what |
@@ -1530,6 +1533,8 @@ Defaults, bounds and the per-call change limit (`MaxChangeBps`, 5000 = at most 5
 | `upgradeTimelock` | 7 d (604800 s) | 1 d (86400 s) | 30 d (2592000 s) | 5000 | timelock of upgrade-accept proposals |
 | `guardianHandoverMembers` | 25 | 1 | 1,000 | 5000 | staked members at which the guardian hands authority over |
 | `kourtRealm` | "" |  |  | text | package path of the Kourt adapter realm |
+
+On a development chain (chain id `dev`: gnodev) these bounds are relaxed so `make demo` can run in minutes (`docs/DEMO.md`): `epochBlocks` min 10, change 5,000; `commitPeriod` min 30; `revealPeriod` min 30; `commitPeriod2` min 30; `revealPeriod2` min 30; `executionWindow` min 60; `upgradeTimelock` min 30. The defaults are the same everywhere; on the DAO the relaxed values are set with `DevSetParam`, which refuses on any other chain.
 
 ## Appendix D: machine views
 
