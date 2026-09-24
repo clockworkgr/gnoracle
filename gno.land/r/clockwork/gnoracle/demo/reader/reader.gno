@@ -91,11 +91,20 @@ func Render(path string) string {
 		credit, spent, reads = c.Balance, c.Spent, c.Reads
 	}
 	b.WriteString("| read credit | " + gnot(credit) + " GNOT left, " + gnot(spent) + " GNOT spent over " + strconv.FormatInt(reads, 10) + " reads |\n")
-	b.WriteString("| readings kept | " + strconv.Itoa(len(readings)) + " |\n\n")
+	b.WriteString("| readings kept | " + strconv.Itoa(len(readings)) + " |\n")
 	if len(readings) == 0 {
-		b.WriteString("_No readings yet._\n")
+		b.WriteString("\n_No readings yet: nobody has called `Poll` since this realm was deployed._\n")
 		return b.String()
 	}
+	// Last() is a free view; a page is a query, so it may show the stored
+	// reading, but it cannot read the feed itself (that is a paid call)
+	last := Last()
+	name := strconv.FormatUint(last.Feed, 10)
+	if f := core.GetFeed(last.Feed); f != nil && f.Spec != nil {
+		name += " " + f.Spec.Name
+	}
+	b.WriteString("| last reading | **" + fixed(last.Value, last.Decimals) + "** (" + last.Tier + ") for round " + strconv.FormatUint(last.Round, 10) +
+		" of feed " + name + ", read at height " + strconv.FormatInt(last.Height, 10) + ", " + time.Unix(last.Time, 0).UTC().Format("2006-01-02 15:04:05") + " UTC |\n\n")
 	b.WriteString("| # | height | chain time | feed | round | value | tier |\n|---|---|---|---|---|---|---|\n")
 	for i := len(readings) - 1; i >= 0; i-- {
 		r := readings[i]

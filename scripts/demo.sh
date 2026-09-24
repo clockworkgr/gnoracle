@@ -174,13 +174,14 @@ preflight() {
 ensure_chain() {
   if ! lsof -nP -iTCP:"$RPC" -sTCP:LISTEN >/dev/null 2>&1; then
     step "starting a local chain (make dev RPC=$RPC WEB=$WEB); it stays up after the demo"
-    detach gnodev-make "$OUT/gnodev.log" make -s dev RPC="$RPC" WEB="$WEB"
+    detach gnodev-make "$OUT/gnodev.log" make -s dev RPC="$RPC" WEB="$WEB" WATCH=0
     STARTED_CHAIN=1
   elif [ "${RESET:-0}" = 1 ]; then
     step "resetting the running chain (POST $WEBURL/reset)"
     curl -fsS -m 60 -X POST "$WEBURL/reset" -o /dev/null || fail "reset failed: is gnodev's unsafe API on (the default) and WEB=$WEB its web port?"
   else
     step "using the chain on $REMOTE (RESET=1 to start from a clean one)"
+    say "note: a chain started with WATCH=1 hot-reloads on any edit in the repository and comes back half-applied; the demo starts its own with -no-watch"
   fi
   local deadline=$((SECONDS + 240))
   until pkg_exists "$CORE" && pkg_exists "$READER" && pkg_exists "$KV3"; do

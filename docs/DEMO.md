@@ -97,6 +97,13 @@ and the settlement 72 hours later. `RESET=1` gives a clean chain.
   before this repo added the reader realm or the Kourt v3 release is still
   running; stop it and let the demo start its own (or `make dev` again).
 - *A port is in use* (38998 for the demo's price server): set `PRICE_PORT`.
+- *The pages emptied out by themselves* (no readings, no claim, height back
+  near 2): the chain hot-reloaded. A gnodev started with `make dev WATCH=1`
+  watches the repository and, on any file change, reloads the packages and
+  replays the whole history into one block, which our once-per-height
+  parameter changes cannot survive. The demo starts its chain with
+  `-no-watch` (the default of `make dev` too); do not point it at a watching
+  chain if you intend to edit files while browsing.
 - *The demo stopped mid-way*: `make demo-stop`, then `RESET=1 make demo`.
   The chain state is a throwaway; the keys in `.dev-keys/` are the public
   gnodev ones and never worth anything.

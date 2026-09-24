@@ -70,10 +70,15 @@ fmt: toolchain ## gno fmt, in place
 # the stock ports can coexist; run `make dev RPC=36657 WEB=38888` to match them.
 RPC ?= 26657
 WEB ?= 8888
+# Hot reload is off by default: gnodev replays the whole history into one
+# block when a file changes, and parameters that move at most once per height
+# make that replay lossy (the chain comes back half-applied). WATCH=1 for the
+# classic edit-and-reload loop when no script is driving the chain.
+WATCH ?= 0
 DEV_PATHS ?= gno.land/r/clockwork/gnoracle/core,gno.land/r/clockwork/gnoracle/core/impl/v1,gno.land/r/clockwork/gnoracle/core/impl/v2,gno.land/r/clockwork/gnoracle/token,gno.land/r/clockwork/gnoracle/dao,gno.land/r/clockwork/gnoracle/dao/impl/v1,gno.land/r/clockwork/gnoracle/dao/impl/v2,gno.land/r/clockwork/gnoracle/dao/exec,gno.land/r/clockwork/gnoracle/kourtdev,gno.land/r/clockwork/gnoracle/kourt,gno.land/r/clockwork/gnoracle/kourt/impl/v1,gno.land/r/clockwork/gnoracle/kourt/impl/kourtv3,gno.land/r/clockwork/gnoracle/demo/reader
 
-dev: toolchain deps ## local chain + gnoweb (RPC=36657 WEB=38888 matches the dev configs); do not edit the tree while it runs
-	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -web-help-remote http://127.0.0.1:$(RPC) -paths $(DEV_PATHS) -web-home /r/clockwork/gnoracle/core .
+dev: toolchain deps ## local chain + gnoweb (RPC=36657 WEB=38888 matches the dev configs; WATCH=1 hot-reloads on edits and resets the chain)
+	$(GNODEV) local -node-rpc-listener 127.0.0.1:$(RPC) -web-listener 127.0.0.1:$(WEB) -web-help-remote http://127.0.0.1:$(RPC) $(if $(filter 0,$(WATCH)),-no-watch) -paths $(DEV_PATHS) -web-home /r/clockwork/gnoracle/core .
 
 chain-test: ## drive a running gnodev through a feed lifecycle with gnokey (needs make dev in another shell)
 	@./scripts/chain-test.sh

@@ -128,6 +128,8 @@ func TestReaderRecordsWhatItIsServed(cur realm, t *testing.T) {
 	uassert.True(t, strings.Contains(page, "| 2 | "+strconv.FormatInt(last.Height, 10)+" | "))
 	uassert.True(t, strings.Contains(page, "DEMO/USD"))
 	uassert.True(t, strings.Contains(page, "| 1.00"))
+	uassert.True(t, strings.Contains(page, "| last reading | **1.00"))
+	uassert.True(t, strings.Contains(page, "read at height "+strconv.FormatInt(last.Height, 10)))
 	node, err := json.Unmarshal([]byte(reader.Render("json")))
 	uassert.NoError(t, err)
 	n, _ := node.MustKey("count").GetNumeric()
